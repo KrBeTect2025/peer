@@ -2,13 +2,33 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 
+room: dict[str, list[WebSocket]] = {}  # create an empty dict for rooms
 
-@app.websocket("/ws")
-async def echo(websocket: WebSocket):
+
+@app.websocket("/ws/{room_id}")
+async def signaling(websocket: WebSocket, room_id: str):
     await websocket.accept()
+
+    if room_id not in room:
+        room[room_id] = []
+
+    if len(room[room_id]) >= 2:
+        await websocket.close(code=1008)
+        return
+    room[room_id].append(websocket)
+    print("room", room_id, "has", len(room[room_id]), "people")
+
     try:
         while True:
             text = await websocket.receive_text()
-            await websocket.send_text(f"you said {text}")
+            for peer in room[room_id]:
+                if peer is not websocket:
+                    await peer.send_text(text)
+
     except WebSocketDisconnect:
-        print("Client lEFT")
+        pass
+
+    finally:
+        room[room_id].remove(websocket)
+        if not room[room_id]:
+            del room[room_id]
