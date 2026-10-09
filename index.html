@@ -14,14 +14,18 @@
         let ws, pc, channel;
         let chain = Promise.resolve();
         const log = (t) => document.getElementById("log").textContent += t + "\n";
+        log("page version 2");
 
         function createPeer() {
+            if (pc) pc.close();
             pc = new RTCPeerConnection({ iceServers: [] });
             pc.onicecandidate = (e) => {
                 if (e.candidate) {
                     ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
                 }
             };
+            pc.oniceconnectionstatechange = () => log("ice: " + pc.iceConnectionState);
+            pc.onconnectionstatechange = () => log("conn: " + pc.connectionState);
             pc.ondatachannel = (e) => setupChannel(e.channel);
         }
 
@@ -32,6 +36,7 @@
         }
 
         async function handle(m) {
+            log("got " + m.type + ", state: " + (pc ? pc.signalingState : "no pc"));
             if (m.type === "ready") {
                 createPeer();
                 setupChannel(pc.createDataChannel("chat"));
@@ -45,6 +50,10 @@
                 await pc.setLocalDescription(answer);
                 ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription }));
             } else if (m.type === "answer") {
+                if (pc.signalingState !== "have-local-offer") {
+                    log("ignored unexpected answer");
+                    return;
+                }
                 await pc.setRemoteDescription(m.sdp);
             } else if (m.type === "candidate") {
                 await pc.addIceCandidate(m.candidate);
@@ -52,16 +61,21 @@
         }
 
         document.getElementById("join").onclick = () => {
+            if (ws) return;
             const room = document.getElementById("room").value;
             ws = new WebSocket(`ws://${location.host}/ws/${room}`);
-            ws.onopen = () => ws.send(JSON.stringify({ type: "ready" }));
             ws.onmessage = (e) => {
                 chain = chain.then(() => handle(JSON.parse(e.data)));
             };
+            document.getElementById("join").disabled = true;
         };
 
         document.getElementById("send").onclick = () => {
             const text = document.getElementById("msg").value;
+            if (!channel || channel.readyState !== "open") {
+                log("channel not open yet");
+                return;
+            }
             channel.send(text);
             log("me: " + text);
         };

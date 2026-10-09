@@ -29,7 +29,7 @@ async def signaling(websocket: WebSocket, room_id: str):
             text = await websocket.receive_text()
             for peer in room[room_id]:
                 if peer is not websocket:
-                    await peer.send_text(text)
+                    await peer.send_text('{"TYPE" : "READY"}')
 
     except WebSocketDisconnect:
         pass
