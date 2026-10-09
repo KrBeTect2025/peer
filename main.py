@@ -1,8 +1,14 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
 room: dict[str, list[WebSocket]] = {}  # create an empty dict for rooms
+
+
+@app.get("/")
+def index():
+    return FileResponse("index.html")
 
 
 @app.websocket("/ws/{room_id}")
