@@ -4,33 +4,37 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebRTC Call</title>
+    <title>P2P File Share</title>
     <link rel="icon" href="data:,">
     <style>
         body { font-family: sans-serif; margin: 16px; background: #f4f4f4; }
-        .videos { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
-        video { width: 320px; max-width: 100%; background: #000; border-radius: 6px; }
-        #chat { height: 160px; overflow-y: auto; background: #fff; border: 1px solid #ccc; padding: 6px; margin: 0; }
-        #status { color: #555; }
+        section { background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 12px; margin-bottom: 12px; max-width: 480px; }
+        h4 { margin: 0 0 8px; }
+        #code { font-size: 2em; font-weight: bold; letter-spacing: 6px; margin: 8px 0; }
+        #codeIn { font-size: 1.2em; width: 8em; letter-spacing: 3px; }
+        progress { width: 100%; max-width: 506px; }
+        .status { color: #555; margin-top: 6px; word-break: break-all; }
     </style>
 </head>
 
 <body>
-    <h3>WebRTC Call</h3>
+    <h3>P2P File Share</h3>
 
-    <input id="room" value="abc123">
-    <button id="join">Join</button>
-    <button id="hangup" disabled>Hang up</button>
-    <span id="status">idle</span>
+    <section>
+        <h4>Send <small>(max 25 MB)</small></h4>
+        <input type="file" id="file">
+        <div id="code"></div>
+        <div class="status" id="sendStatus"></div>
+    </section>
 
-    <div class="videos">
-        <video id="local" autoplay playsinline muted></video>
-        <video id="remote" autoplay playsinline></video>
-    </div>
+    <section>
+        <h4>Receive</h4>
+        <input id="codeIn" inputmode="numeric" maxlength="6" placeholder="code">
+        <button id="receive">Receive</button>
+        <div class="status" id="recvStatus"></div>
+    </section>
 
-    <pre id="chat"></pre>
-    <input id="msg" placeholder="type a message">
-    <button id="send">Send</button>
+    <progress id="bar" value="0" max="1" hidden></progress>
 
     <script src="/static/app.js"></script>
 </body>

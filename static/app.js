@@ -1,104 +1,175 @@
+// P2P file transfer: the file goes browser -> browser over an RTCDataChannel.
+// The server only relays the handshake (offer/answer/candidates); it never sees file bytes.
+
 // ---------- state ----------
-let ws;                        // WebSocket to our FastAPI signaling server
+let ws;                        // WebSocket to the signaling server
 let pc;                        // RTCPeerConnection to the other browser
-let channel;                   // RTCDataChannel used for chat
-let localStream;               // our camera + mic
 let iceServers = [];           // STUN/TURN list, fetched from /config
+let route = "";                // how the browsers reached each other: "direct" or "relay"
 let chain = Promise.resolve(); // runs signaling messages one at a time, in order
+let file = null;               // sender: the file being shared; receiver: null
+let statusEl;                  // status line of whichever side (send/receive) is active
+let joinId = 0;                // bumped by leave(), so a join still awaiting config can't revive an old code
+
+const CHUNK = 64 * 1024;             // bytes per DataChannel message
+const HIGH_WATER = 1024 * 1024;      // pause reading the file while this much is queued unsent
+// the server never sees the file, so the browsers enforce this: the sender won't share more, the receiver won't accept more
+const MAX_SIZE = 25 * 1048576;
 
 const $ = (id) => document.getElementById(id);
-const status = (t) => ($("status").textContent = t);
-const say = (t) => {
-    $("chat").textContent += t + "\n";
-    $("chat").scrollTop = $("chat").scrollHeight;
+const status = (t) => (statusEl.textContent = t);
+const mb = (n) => (n / 1048576).toFixed(1) + " MB";
+const progress = (done, total) => {
+    $("bar").hidden = false;
+    $("bar").value = total ? done / total : 1;
 };
+// fetch ICE servers as soon as the page opens, so pressing Send/Receive doesn't wait for it
+const loadConfig = () => fetch("/config").then((r) => r.json()).then((c) => c.iceServers);
+let configReady = loadConfig();
+// the first RTCPeerConnection in a browser can take seconds to create (WebRTC network setup);
+// pay that right after the page renders, while the user is still picking a file or typing the code
+setTimeout(() => new RTCPeerConnection().close(), 0);
 const send = (obj) => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 };
-
-// open the page with ?relay=1 to force all traffic through TURN (for testing coturn)
-const forceRelay = new URLSearchParams(location.search).has("relay");
 
 // ---------- peer connection ----------
 function createPeer() {
     if (pc) pc.close();
     const conn = new RTCPeerConnection({
         iceServers,
-        iceTransportPolicy: forceRelay ? "relay" : "all",
+        // open the page with ?relay=1 to force everything through TURN (for testing the relay)
+        iceTransportPolicy: new URLSearchParams(location.search).has("relay") ? "relay" : "all",
     });
     pc = conn;
-
-    // send our camera/mic to the other side
-    if (localStream) {
-        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-    }
-
-    // every network address (candidate) we discover goes to the peer via the server
     pc.onicecandidate = (e) => {
         if (e.candidate) send({ type: "candidate", candidate: e.candidate });
     };
-
-    // the peer's video/audio arrived
-    pc.ontrack = (e) => {
-        $("remote").srcObject = e.streams[0];
-    };
-
-    // the answering side receives the chat channel the offerer created
+    // whoever joined the code second gets the channel from the other side
     pc.ondatachannel = (e) => setupChannel(e.channel);
-
     pc.onconnectionstatechange = () => {
-        status(conn.connectionState);
-        if (conn.connectionState === "connected") logRoute(conn).catch(() => {});
+        if (conn !== pc) return;
+        if (conn.connectionState === "connected") findRoute(conn).catch(() => {});
+        if (conn.connectionState === "failed") {
+            status("connection failed (different networks need a reachable TURN server)");
+        }
     };
 }
 
-function setupChannel(ch) {
-    channel = ch;
-    channel.onopen = () => say("-- chat connected --");
-    channel.onclose = () => say("-- chat closed --");
-    channel.onmessage = (e) => say("peer: " + e.data);
-}
-
-// shows how the two browsers actually reached each other:
-// host = direct on LAN, srflx = direct through NAT (STUN), relay = through TURN
-async function logRoute(conn) {
+// host = same network, srflx/prflx = direct through NAT, relay = through the TURN server
+async function findRoute(conn) {
     const stats = await conn.getStats();
     let pair;
     stats.forEach((s) => {
         if (s.type === "transport" && s.selectedCandidatePairId) pair = stats.get(s.selectedCandidatePairId);
     });
     if (!pair) stats.forEach((s) => { if (s.type === "candidate-pair" && s.selected) pair = s; }); // Firefox
-    if (!pair) return;
-    const local = stats.get(pair.localCandidateId);
-    const remote = stats.get(pair.remoteCandidateId);
+    const local = pair && stats.get(pair.localCandidateId);
+    const remote = pair && stats.get(pair.remoteCandidateId);
     if (!local || !remote) return;
-    say(`-- route: ${local.candidateType} <-> ${remote.candidateType} --`);
+    route = local.candidateType === "relay" || remote.candidateType === "relay" ? "relay"
+        : local.candidateType === "host" && remote.candidateType === "host" ? "direct, same network" : "direct";
+}
+
+// either side may have created the channel; what matters is who holds the file
+function setupChannel(ch) {
+    ch.binaryType = "arraybuffer";
+    if (!file) return receiveInto(ch);
+    const start = () => sendFile(ch).catch((err) => status("send failed: " + err.message));
+    if (ch.readyState === "open") start();
+    else ch.onopen = start;
+}
+
+// ---------- sending ----------
+async function sendFile(ch) {
+    const chunk = Math.min(CHUNK, pc.sctp?.maxMessageSize || CHUNK);
+    ch.bufferedAmountLowThreshold = HIGH_WATER / 2;
+    ch.onmessage = (e) => {
+        if (e.data !== "done") return;
+        closePeer(); // receiver has everything; stay on the code for the next receiver
+        status(`sent ✓  code still active, keep this tab open to send again`);
+    };
+
+    ch.send(JSON.stringify({ name: file.name, size: file.size, type: file.type }));
+    for (let off = 0; off < file.size; off += chunk) {
+        if (ch.bufferedAmount > HIGH_WATER) {
+            await new Promise((r) => ch.addEventListener("bufferedamountlow", r, { once: true }));
+        }
+        if (ch.readyState !== "open") return; // receiver left mid-transfer
+        ch.send(await file.slice(off, off + chunk).arrayBuffer());
+        const done = Math.max(0, Math.min(off + chunk, file.size) - ch.bufferedAmount); // actually sent
+        progress(done, file.size);
+        status(`sending ${mb(done)} / ${mb(file.size)}  ${route}`);
+    }
+    status("waiting for receiver to confirm...");
+}
+
+// ---------- receiving ----------
+function receiveInto(ch) {
+    let meta;
+    let parts = [];
+    let got = 0;
+    let t0;
+
+    ch.onmessage = (e) => {
+        if (typeof e.data === "string") {
+            meta = JSON.parse(e.data);
+            t0 = performance.now();
+        } else {
+            parts.push(e.data);
+            got += e.data.byteLength;
+        }
+        // don't trust the sender's page to have checked the size
+        if (!meta || meta.size > MAX_SIZE || got > meta.size) {
+            ch.onclose = null;
+            leave();
+            status(`transfer refused: the file is over the ${mb(MAX_SIZE)} limit`);
+            return;
+        }
+        progress(got, meta.size);
+        const speed = mb(got / ((performance.now() - t0) / 1000 || 1));
+        status(`receiving ${meta.name}  ${mb(got)} / ${mb(meta.size)}  (${speed}/s, ${route || "connecting"})`);
+        if (got === meta.size) {
+            save(meta, parts);
+            parts = [];
+            ch.send("done"); // sender closes the connection when it gets this
+        }
+    };
+    // fires after "done" (sender closed) or if the sender vanished mid-transfer
+    ch.onclose = () => {
+        if (!meta || got < meta.size) status("transfer stopped: the sender picked another file, closed the tab or lost connection");
+        leave();
+    };
+}
+
+// ponytail: whole file is held in memory until saved; fine at MAX_SIZE, OK up to ~1-2 GB on desktop, less on phones.
+// Raising the cap past that needs streaming to disk with showSaveFilePicker() (Chrome) or a service worker.
+function save(meta, parts) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(parts, { type: meta.type }));
+    a.download = meta.name;
+    a.textContent = "save " + meta.name;
+    statusEl.replaceChildren("received ✓  ", a);
+    a.click();
 }
 
 // ---------- signaling ----------
 async function handle(msg) {
     if (msg.type === "ready") {
-        // we were here first: we make the offer
+        // we were on the code first: we make the offer
         createPeer();
-        setupChannel(pc.createDataChannel("chat"));
-        if (!localStream) {
-            // no camera here: still ask to *receive* the peer's video/audio
-            pc.addTransceiver("video", { direction: "recvonly" });
-            pc.addTransceiver("audio", { direction: "recvonly" });
-        }
+        setupChannel(pc.createDataChannel("file"));
         await pc.setLocalDescription(await pc.createOffer());
         send({ type: "offer", sdp: pc.localDescription });
-        status("calling...");
+        status("connecting...");
     } else if (msg.type === "offer") {
-        // someone is calling us: answer
         createPeer();
         await pc.setRemoteDescription(msg.sdp);
         await pc.setLocalDescription(await pc.createAnswer());
         send({ type: "answer", sdp: pc.localDescription });
+        status("connecting...");
     } else if (msg.type === "answer") {
-        if (pc && pc.signalingState === "have-local-offer") {
-            await pc.setRemoteDescription(msg.sdp);
-        }
+        if (pc && pc.signalingState === "have-local-offer") await pc.setRemoteDescription(msg.sdp);
     } else if (msg.type === "candidate") {
         if (!pc) return;
         try {
@@ -107,89 +178,110 @@ async function handle(msg) {
             console.warn("bad candidate", err);
         }
     } else if (msg.type === "bye") {
-        closePeer();
-        status("peer left, waiting...");
-        say("-- peer left --");
-    } else if (msg.type === "full") {
-        hangup("room is full");
+        if (file) {
+            // receiver left before finishing (after "done", pc is already null); keep waiting on the same code
+            if (!pc) return;
+            closePeer();
+            status("receiver left, waiting for receiver...");
+        } else {
+            // the sender closed the tab, picked another file, or the code's hour ran out: the code is gone
+            leave();
+            status(msg.reason === "expired" ? "code expired (codes last 1 hour)"
+                : "the sender closed the tab or picked another file, this code no longer works");
+        }
     }
 }
 
-// ---------- buttons ----------
-async function join() {
-    const room = $("room").value.trim();
-    if (!room || ws) return;
-    $("join").disabled = true;
-    status("starting...");
+const EXPIRED = "code expired: the sender closed the tab, picked another file, or its 1 hour ran out";
 
+async function join(code) {
+    const id = joinId;
     try {
-        iceServers = (await (await fetch("/config")).json()).iceServers;
+        iceServers = await configReady;
     } catch (err) {
+        configReady = loadConfig(); // retry on the next attempt
         status("can't reach server");
-        $("join").disabled = false;
         return;
     }
-
-    try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $("local").srcObject = localStream;
-    } catch (err) {
-        say("-- no camera/mic (" + err.name + "), chat only --");
-    }
-
+    if (id !== joinId) return; // user picked another file / code meanwhile
+    route = "";
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(room)}`);
+    const socket = new WebSocket(`${proto}://${location.host}/ws/file-${code}${file ? "?role=send" : ""}`);
     ws = socket;
-    // fresh queue: if we hung up mid-setup, the old queue may be stuck on a closed connection forever
     chain = Promise.resolve();
-    socket.onopen = () => status("waiting for peer...");
     socket.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        // skip messages from an old socket if the user hung up and rejoined meanwhile
         chain = chain.then(() => socket === ws && handle(msg)).catch(console.error);
     };
     socket.onclose = (e) => {
-        // 1008 = server refused us because the room already has 2 people
-        if (socket === ws) hangup(e.code === 1008 ? "room is full" : "disconnected from server");
+        if (socket !== ws) return; // we closed it ourselves
+        ws = null;
+        closePeer();
+        if (e.code === 4409) share(file); // sender's random code is taken: pick another
+        else if (e.code === 4404) status("no such code, check the digits");
+        else if (e.code === 4410) status(file ? "code expired (codes last 1 hour), pick the file again for a new code" : EXPIRED);
+        else if (e.code === 1008) status("code busy, someone is receiving it, try again in a moment");
+        else if (e.code === 1011) status("server error, try again in a moment");
+        else status("disconnected from server");
+        if (file && e.code !== 4409) $("code").textContent = ""; // that code is dead now
     };
-    $("hangup").disabled = false;
 }
 
 function closePeer() {
     if (pc) pc.close();
     pc = null;
-    channel = null;
-    $("remote").srcObject = null;
 }
 
-function hangup(reason) {
+function leave() {
+    joinId++;
     closePeer();
     const socket = ws;
     ws = null;
     if (socket) socket.close();
-    if (localStream) localStream.getTracks().forEach((t) => t.stop());
-    localStream = null;
-    $("local").srcObject = null;
-    $("join").disabled = false;
-    $("hangup").disabled = true;
-    status(reason || "idle");
 }
 
-function sendChat() {
-    const text = $("msg").value;
-    if (!text) return;
-    if (!channel || channel.readyState !== "open") {
-        say("-- not connected yet --");
+// ---------- buttons ----------
+$("file").onchange = () => {
+    if ($("file").files[0]) share($("file").files[0]);
+};
+
+// new file = new code; leave() drops the old code on the server immediately
+function share(f) {
+    leave();
+    statusEl = $("sendStatus");
+    $("recvStatus").textContent = "";
+    $("bar").hidden = true;
+    if (f.size > MAX_SIZE) {
+        file = null;
+        $("file").value = "";
+        $("code").textContent = "";
+        status(`${f.name} is ${mb(f.size)}, the limit is ${mb(MAX_SIZE)}`);
         return;
     }
-    channel.send(text);
-    say("me: " + text);
-    $("msg").value = "";
+    file = f;
+    // 6 random digits: easy to type on a phone
+    const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1e6).padStart(6, "0");
+    $("code").textContent = code;
+    status(`${f.name} (${mb(f.size)})  enter this code on the other device, keep this tab open`);
+    join(code);
 }
 
-$("join").onclick = join;
-$("hangup").onclick = () => hangup();
-$("send").onclick = sendChat;
-$("msg").onkeydown = (e) => {
-    if (e.key === "Enter") sendChat();
+$("receive").onclick = () => {
+    const code = $("codeIn").value.trim();
+    if (!/^\d{6}$/.test(code)) {
+        $("recvStatus").textContent = "enter the 6-digit code";
+        return;
+    }
+    leave();
+    file = null;
+    statusEl = $("recvStatus");
+    $("file").value = "";
+    $("code").textContent = "";
+    $("sendStatus").textContent = "";
+    $("bar").hidden = true;
+    status("waiting for sender...");
+    join(code);
+};
+$("codeIn").onkeydown = (e) => {
+    if (e.key === "Enter") $("receive").click();
 };
