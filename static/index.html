@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WebRTC Call</title>
+    <link rel="icon" href="data:,">
+    <style>
+        body { font-family: sans-serif; margin: 16px; background: #f4f4f4; }
+        .videos { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+        video { width: 320px; max-width: 100%; background: #000; border-radius: 6px; }
+        #chat { height: 160px; overflow-y: auto; background: #fff; border: 1px solid #ccc; padding: 6px; margin: 0; }
+        #status { color: #555; }
+    </style>
+</head>
+
+<body>
+    <h3>WebRTC Call</h3>
+
+    <input id="room" value="abc123">
+    <button id="join">Join</button>
+    <button id="hangup" disabled>Hang up</button>
+    <span id="status">idle</span>
+
+    <div class="videos">
+        <video id="local" autoplay playsinline muted></video>
+        <video id="remote" autoplay playsinline></video>
+    </div>
+
+    <pre id="chat"></pre>
+    <input id="msg" placeholder="type a message">
+    <button id="send">Send</button>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

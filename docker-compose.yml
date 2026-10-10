@@ -1,0 +1,31 @@
+services:
+  # FastAPI: serves the page + WebSocket signaling over HTTPS
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./certs:/app/certs:ro
+
+  # coturn = our own STUN + TURN server
+  coturn:
+    image: coturn/coturn:4.18.0
+    restart: unless-stopped
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    command:
+      - -n
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${TURN_USER}:${TURN_PASS}
+      - --realm=webrtc.local
+      - --external-ip=${EXTERNAL_IP}
+      - --min-port=49160
+      - --max-port=49200
+      - --no-tls
+      - --log-file=stdout
