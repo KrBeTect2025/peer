@@ -7,9 +7,11 @@ app/
   main.py              FastAPI: serves the page, hands out ICE config, relays signaling messages
   static/index.html    the page (Send box, Receive box, progress bar)
   static/app.js        all the WebRTC + file transfer logic in the browser
+  static/sw.js         service worker: turns an incoming file into a normal browser download
   Dockerfile           how the FastAPI app is packaged into a container
   docker-compose.yml   runs "web" (FastAPI), "redis" (active codes) and "tunnel" (Cloudflare)
   .env                 your Metered TURN credentials URL (not committed)
+  tests/               test scripts and the test report (tests/REPORT.md)
 ```
 
 ---
@@ -97,7 +99,7 @@ Every message the server sends to a browser goes through this. If the *other* pe
 
 ### `GET /` and `GET /config`
 
-`/` returns `static/index.html`. `/config` returns exactly the object the browser passes to `new RTCPeerConnection(...)`.
+`/` returns `static/index.html`. `/sw.js` returns the service worker from the root of the site (see `streamSink`). `/config` returns exactly the object the browser passes to `new RTCPeerConnection(...)`.
 
 It fetches a ready-made `iceServers` list from Metered's hosted STUN/TURN (`METERED_TURN_URL` in `.env`): STUN addresses plus TURN servers with fresh credentials. TURN is reachable from anywhere, so two browsers on any networks (even behind CGNAT or mobile data) can connect. Serving the list from the server keeps the API key out of the page.
 
@@ -114,6 +116,7 @@ The Metered API takes seconds to answer, so the list is cached for an hour (a fa
   
   The `active` key lives 60 s longer than the timeout, so it can't vanish (and be grabbed by a new sender) before it's marked `expired`.
 - A room holds at most **2** sockets. A third gets `{"type":"full"}` and is closed with code 1008. In the file share, that means "someone is already receiving on this code"; the page shows "code busy, try again in a moment".
+- Once a sender's code is registered, the server sends it `{"type":"created"}`, and only then does the page show the code. (Showing it straight away let a quick receiver, over the internet, try the code before it existed and get "no such code".)
 - When the second socket arrives, the server sends `ready` **only to the first one**. Exactly one side must create the offer. If both did, the two offers would cross ("glare") and the connection would break.
 - Every other message is forwarded unchanged to the other socket. The server never looks inside, which is why it's so small.
 - When a socket leaves, the other one gets `bye`, and an empty room is deleted.
@@ -206,7 +209,7 @@ Receivers get binary chunks as `ArrayBuffer`s. Senders start sending as soon as 
 | Direction | Message | Meaning |
 |---|---|---|
 | sender → receiver | `{"name","size","type"}` (string) | What's coming |
-| receiver → sender | `"go"` | The receiver has somewhere to save it; start sending |
+| receiver → sender | `"go"` | The receiver has somewhere to save it (for the download bar: the download has actually started); start sending |
 | sender → receiver | binary, 64 KB each | The file, in order |
 | receiver → sender | `"ack <n>"` | The first `n` bytes are written to disk |
 | receiver → sender | `"done"` | The whole file is saved; the sender closes the connection |
@@ -238,24 +241,83 @@ When the receiver replies `"done"`, the sender closes the connection but **keeps
 
 ### Receiving: `receiveInto(ch)` and `openSink(meta)`
 
-When the `{name,size,type}` message arrives, `openSink()` picks where the file goes, best first:
+When the `{name,size,type}` message arrives, `openSink()` picks where the file goes, best first. Every option
+("sink") has the same three methods: `write(blob)`, `close()` and `abort()`.
 
 | Browser | Where the bytes go | Size limit |
 |---|---|---|
-| **Chrome / Edge** (`showSaveFilePicker`) | A "save name (size)" button appears; it opens the system save dialog (it may only open from a click), and every batch is written straight into the chosen file | Free disk space |
-| **Firefox / Safari** (`navigator.storage.getDirectory`, OPFS) | The site's private disk storage, then handed over as a normal download at the end | The browser's storage quota for the site (checked before starting), and the size free twice until the download copy is done |
-| **Neither** | Memory | `MEM_MAX`, 1 GB |
+| **Chrome / Edge / Firefox** (service worker, HTTPS or localhost) | **A normal browser download**: it shows up in the download bar the moment the transfer starts and fills as the bytes arrive. No dialog, no copy. See `streamSink` below | Free disk space |
+| **Chrome / Edge without a service worker** (`showSaveFilePicker`) | A "save name (size)" button opens the system save dialog (it may only open from a click), and every batch is written straight into the chosen file | Free disk space |
+| **Safari** (`navigator.storage.getDirectory`, OPFS) | The site's private disk storage, then handed over as a normal download at the end | The site's storage quota (checked before starting), and the size free twice until the download copy is done |
+| **None of those** | Memory | `MEM_MAX`, 1 GB |
 
 Then the receiver sends `"go"`, and for every chunk:
-- adds it to a batch; at 8 MB (`FLUSH`) the batch is written to disk as one `Blob`, and `"ack <bytes so far>"` goes
-  back once the write has finished. Writes are chained on one promise, so they land in order.
+- adds it to a batch; at 8 MB (`FLUSH`) the batch goes to the sink as one `Blob`, and `"ack <bytes so far>"` goes
+  back once the sink has taken it. Writes are chained on one promise, so they land in order.
 - refuses (and leaves) if more bytes arrive than were announced, so a modified sender page can't push more.
-- when `got` reaches `meta.size`, waits for the last write, closes the file (Chrome writes into `name.crswap` and
-  renames it here), sends `"done"`, and shows "received ✓". An empty file works too.
+- when `got` reaches `meta.size`, waits for the last write, closes the sink, sends `"done"`, and shows "received ✓".
+  An empty file works too.
+
+If anything goes wrong (the sender vanishes, the receiver refuses, a write fails), `abort()` is called: the
+streamed download shows as **failed** in the download bar instead of hanging at 37%, and the save-dialog file's
+half-written temp file is deleted. Cancelling in the download bar makes the next write fail, so the receiver shows
+"download cancelled" and leaves, and the sender goes back to "waiting for receiver".
 
 `ch.onclose` fires when the sender closes the connection after `"done"`, or if the sender vanishes. If not everything arrived, it shows "transfer stopped". Either way it calls `leave()`.
 
-**Tested:** a 50 GB file through the Chrome save dialog and 9.5 GB through OPFS, both byte-identical, with the receiving browser flat at ~420 MB the whole time. The old in-memory version needed ~2.4× the file size in RAM and broke at 8 GB on a 16 GB laptop. Chrome and Edge gave a site 10 GB of OPFS on the test machine, which is why they use the save dialog instead.
+### `streamSink(meta)` + `sw.js`: receiving into the browser's own downloads
+
+A web page can't write to your Downloads folder, but the browser's download manager can, and it will happily
+download anything a server sends with `Content-Disposition: attachment`. The trick is to play that server inside
+the browser, with a **service worker**: a script the browser runs beside the page that can answer the page's
+requests itself.
+
+```
+ DataChannel ──▶ receiver page: writer.write(8 MB batch)
+                    │ TransformStream (writable half stays in the page)
+                    ▼
+                 readable half ──postMessage (transferred)──▶ sw.js keeps it under a one-use URL /dl/<random id>
+ hidden <iframe src="/dl/<id>"> ──request──▶ sw.js: new Response(readable, {attachment, Content-Length})
+                                                  ▼
+                                   browser download manager ──▶ ~/Downloads/<name>   (download bar: x / 40 GB)
+```
+
+1. At page load, `app.js` registers `sw.js`. `main.py` serves it from **`/sw.js`**, not `/static/sw.js`, because a
+   worker only controls URLs under its own folder, and it has to answer `/dl/...`.
+2. `streamSink` makes a `TransformStream` (a pipe: what goes into `.writable` comes out of `.readable`), keeps the
+   writable half, and **transfers** the readable half to the worker with `postMessage`, together with a fresh
+   `crypto.randomUUID()` URL. Streams can only be moved to another thread, not copied, and Safari can't do it
+   at all (`DataCloneError`): `openSink` catches that and moves on to the next option.
+3. The page points a hidden iframe at the URL. The worker answers it with `new Response(stream)` and these headers:
+   - `Content-Disposition: attachment; filename*=UTF-8''…` makes it a download, with the name percent-encoded so
+     Hindi, emoji, quotes and spaces survive;
+   - `Content-Length` (the announced size) lets the download bar show the size and time left from the first second;
+   - `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff` make sure a file from the
+     (untrusted) sender is only ever saved, never displayed or run as part of this site, even if it's an `.html`.
+4. **Backpressure is built in.** `writer.write()` only finishes once the download has taken the batch, and the
+   `ack` is sent after that, so the sender's 64 MB window is limited by how fast the browser writes to disk.
+   Memory stays flat.
+5. **Keep-alive.** The bytes flow through the worker without running any of its code, so to the browser it looks
+   idle, and browsers stop idle workers after ~30 s, which would kill the download. The page posts `"ping"` to it
+   every 10 s while the transfer runs; every message counts as activity.
+6. **Blocked downloads.** The worker tells the page `"started"` when the iframe's request arrives, and only then
+   does the receiver send `"go"`. If nothing arrives within 3 s (a browser that blocks downloads nobody clicked
+   for, like a second one in the same tab), a "download name (size)" button appears, because a click is always
+   allowed to start a download.
+
+7. **Stall guard.** If the browser ever drops the download without saying so (it happened in a test with the
+   ping switched off), writes would wait forever. Once data is flowing, a write that takes over 60 s ends the
+   transfer with "the download stopped responding". The guard only starts after the first batch, so a person
+   using Chrome's "Ask where to save each file" can take their time in that dialog.
+
+There's no resume: the URL is fake and single-use, so the download bar's "Resume" can't fetch it again.
+
+Both tabs also warn before closing mid-transfer (`beforeunload` while `pc` is set): the file only exists
+between the two tabs, so closing either one ends it.
+
+**Tested:** Chrome, Edge and Firefox receivers, 0 bytes to 3 GB (14.6 min), byte-identical every time, receiving
+browser flat at ~400–570 MB; also end-to-end over the public link in real visible Chrome windows. Without the
+ping, Firefox killed the download at exactly 30 s. Details in [tests/REPORT.md](tests/REPORT.md).
 
 ### `closePeer()` and `leave()`
 
@@ -344,12 +406,6 @@ Useful browser pages: `chrome://webrtc-internals` (Chrome) and `about:webrtc` (F
 
 ## 9. How it was tested
 
-An automated test drove two headless Chrome tabs against the Docker containers:
-
-| Scenario | What's verified |
-|---|---|
-| Send a random file | Receiver's file has the same SHA-256 hash as the original |
-| Second receiver, same code | Gets the file too, after the first one finished |
-| Sender status | Shows "sent ✓" after the receiver confirms |
-
-Not covered yet: real phones, Firefox and Safari, transfers across the internet, and real-world speed (loopback speed on the test machine was limited by its own network stack, not by the app).
+See **[tests/REPORT.md](tests/REPORT.md)** for every test, the results, the bugs testing found, and what isn't
+covered yet. In short: real Chrome, Edge and Firefox browsers driven by scripts in `tests/`, every received file
+checked byte-for-byte against the original, from 0 bytes to 50 GB, plus a run over the public link in visible windows.

@@ -10,6 +10,7 @@ let chain = Promise.resolve(); // runs signaling messages one at a time, in orde
 let file = null;               // sender: the file being shared; receiver: null
 let statusEl;                  // status line of whichever side (send/receive) is active
 let joinId = 0;                // bumped by leave(), so a join still awaiting config can't revive an old code
+let myCode = "";               // sender: the code being set up / shared
 
 const CHUNK = 64 * 1024;             // bytes per DataChannel message
 const HIGH_WATER = 1024 * 1024;      // pause reading the file while this much is queued unsent
@@ -36,6 +37,13 @@ const paintDue = () => {
 // fetch ICE servers as soon as the page opens, so pressing Send/Receive doesn't wait for it
 const loadConfig = () => fetch("/config").then((r) => r.json()).then((c) => c.iceServers);
 let configReady = loadConfig();
+// the service worker turns incoming files into normal browser downloads (see sw.js, streamSink);
+// registering at page load means it's active long before a transfer. No service worker: the other save paths.
+navigator.serviceWorker?.register("/sw.js").catch(() => {});
+// the file only exists between the two tabs: closing either one mid-transfer kills it, so ask first
+addEventListener("beforeunload", (e) => {
+    if (pc) e.preventDefault();
+});
 // the first RTCPeerConnection in a browser can take seconds to create (WebRTC network setup);
 // pay that right after the page renders, while the user is still picking a file or typing the code
 setTimeout(() => new RTCPeerConnection().close(), 0);
@@ -113,7 +121,7 @@ async function sendFile(ch) {
     };
 
     ch.send(JSON.stringify({ name: file.name, size: file.size, type: file.type }));
-    status("waiting for the receiver to choose where to save...");
+    status("waiting for the receiver to start saving...");
     while (!go) {
         if (ch.readyState !== "open") return;
         await nap();
@@ -124,8 +132,9 @@ async function sendFile(ch) {
             if (ch.readyState !== "open") return; // receiver left mid-transfer
             await nap();
         }
-        if (ch.readyState !== "open") return;
-        ch.send(await file.slice(off, off + chunk).arrayBuffer());
+        const data = await file.slice(off, off + chunk).arrayBuffer();
+        if (ch.readyState !== "open") return; // the receiver may have left while that was read from disk
+        ch.send(data);
         if (paintDue()) {
             const done = Math.max(0, Math.min(off + chunk, file.size) - ch.bufferedAmount); // actually sent
             progress(done, file.size);
@@ -150,9 +159,12 @@ function receiveInto(ch) {
     const stop = (why) => {
         failed = true;
         ch.onclose = null;
+        sink?.abort(); // a half-saved file is thrown away / the download shows as failed, not stuck
         leave();
         status(why);
     };
+    // cancelling in the browser's download bar rejects the write with no error at all
+    const saveFailed = (err) => failed || stop(err ? "couldn't save the file: " + (err.message || err) : "download cancelled");
     const flush = () => {
         const blob = new Blob(batch);
         const upto = got; // everything received so far is in this batch or an earlier one
@@ -161,7 +173,7 @@ function receiveInto(ch) {
         writes = writes
             .then(() => !failed && sink.write(blob))
             .then(() => ch.readyState === "open" && ch.send("ack " + upto))
-            .catch((err) => failed || stop("couldn't save the file: " + err.message));
+            .catch(saveFailed);
     };
     const finish = () => {
         writes = writes.then(async () => {
@@ -169,13 +181,14 @@ function receiveInto(ch) {
             status("finishing...");
             await sink.close();
             ch.send("done"); // sender closes the connection when it gets this
-        }).catch((err) => failed || stop("couldn't save the file: " + err.message));
+        }).catch(saveFailed);
     };
 
     ch.onmessage = (e) => {
         if (typeof e.data === "string") {
             meta = JSON.parse(e.data);
             openSink(meta).then((s) => {
+                if (failed || ch.readyState !== "open") return s.abort(); // the sender left while we were opening it
                 sink = s;
                 t0 = performance.now();
                 ch.send("go");
@@ -198,19 +211,32 @@ function receiveInto(ch) {
     };
     // fires after "done" (sender closed) or if the sender vanished mid-transfer
     ch.onclose = () => {
-        if (!meta || got < meta.size) status("transfer stopped: the sender picked another file, closed the tab or lost connection");
+        if (!meta || got < meta.size) {
+            failed = true;
+            sink?.abort();
+            status("transfer stopped: the sender picked another file, closed the tab or lost connection");
+        }
         leave();
     };
 }
 
-// Where the incoming file goes, best first:
-// 1. Chrome/Edge: a file the user picks; every batch is written straight into it (no size limit but free disk)
-// 2. other browsers: the site's private disk storage (OPFS), then handed over as a normal download at the end
+// Where the incoming file goes, best first. Every sink has write(blob), close() and abort().
+// 1. Chrome/Edge/Firefox on HTTPS or localhost: a normal browser download, fed as the bytes arrive
+//    (no dialog, no copy, no size limit but free disk)
+// 2. Chrome/Edge without a service worker: a file the user picks; every batch is written straight into it
+// 3. other browsers (Safari): the site's private disk storage (OPFS), then handed over as a normal download
 //    (needs the file's size free twice until the download copy is done; capped by the browser's storage quota)
-// 3. no disk access at all: memory, up to MEM_MAX
+// 4. no disk access at all: memory, up to MEM_MAX
 async function openSink(meta) {
+    if (navigator.serviceWorker?.controller) {
+        try {
+            return await streamSink(meta);
+        } catch (err) {
+            console.warn("streamed download unavailable, using the next save path", err); // Safari: DataCloneError
+        }
+    }
     if (window.showSaveFilePicker) {
-        await clickToSave(meta); // the save dialog may only open from a click
+        await clickTo(`save ${meta.name} (${mb(meta.size)})`); // the save dialog may only open from a click
         const handle = await showSaveFilePicker({ suggestedName: meta.name });
         return fileSink(handle, () => statusEl.replaceChildren(`received ✓  saved as ${handle.name}`));
     }
@@ -223,10 +249,72 @@ async function openSink(meta) {
         return fileSink(handle, async () => save(meta, await handle.getFile()));
     }
     if (meta.size > MEM_MAX) throw new Error(`this browser can only receive files up to ${mb(MEM_MAX)}`);
-    const parts = [];
+    let parts = [];
     return {
         write: async (blob) => parts.push(blob),
         close: async () => save(meta, new Blob(parts, { type: meta.type })),
+        abort: () => (parts = []),
+    };
+}
+
+// A normal browser download fed by a stream: the page keeps the writable half of a TransformStream and hands
+// the readable half to the service worker, which answers a hidden iframe's request for a one-use URL with it.
+// Throws where a stream can't be handed to the worker (Safari), so openSink falls back.
+async function streamSink(meta) {
+    const sw = (await navigator.serviceWorker.ready).active;
+    const { readable, writable } = new TransformStream();
+    const url = `${location.origin}/dl/${crypto.randomUUID()}`;
+    const { port1, port2 } = new MessageChannel();
+    let onReady, onStarted;
+    const ready = new Promise((r) => (onReady = r));
+    const started = new Promise((r) => (onStarted = r));
+    port1.onmessage = (e) => (e.data === "ready" ? onReady() : onStarted());
+    sw.postMessage({ url, name: meta.name, size: meta.size, stream: readable }, [port2, readable]);
+    // the worker knows the url before the iframe asks for it (no answer: give up and use the next save path)
+    await Promise.race([ready, new Promise((_, no) => setTimeout(no, 3000, new Error("service worker didn't answer")))]);
+
+    // the bytes never run through the worker's own code, so nothing else keeps it awake: browsers stop an idle
+    // worker after ~30 s, which would kill the download. Any message counts as activity.
+    const ping = setInterval(() => sw.postMessage("ping"), 10000);
+    const out = writable.getWriter();
+    const end = () => clearInterval(ping);
+    const startDownload = () => {
+        const frame = document.createElement("iframe");
+        frame.className = "download";
+        frame.hidden = true;
+        frame.src = url;
+        document.body.append(frame);
+    };
+    document.querySelectorAll("iframe.download").forEach((f) => f.remove()); // earlier transfers' (finished) frames
+    startDownload();
+    // a browser that blocks downloads nobody clicked for (e.g. a 2nd one in the same tab) never asks for the url:
+    // after 3 s offer a button, since a click is always allowed to start a download
+    if (await Promise.race([started.then(() => true), new Promise((r) => setTimeout(r, 3000, false))]) === false) {
+        clickTo(`download ${meta.name} (${mb(meta.size)})`).then(startDownload);
+        await started;
+    }
+    let flowing = false;
+    return {
+        // resolves once the download has taken the batch (the stream applies backpressure), so "ack" still
+        // limits the sender to what this side has actually saved
+        write: async (blob) => {
+            const taken = out.write(new Uint8Array(await blob.arrayBuffer()));
+            if (!flowing) return taken.then(() => (flowing = true)); // no limit yet: a Save-As dialog may be open
+            // once flowing, a download the browser silently dropped (e.g. it stopped the worker) would make
+            // writes wait forever: give up after 60 s instead of hanging
+            let timer;
+            const stalled = new Promise((_, no) => (timer = setTimeout(no, 60000, new Error("the download stopped responding"))));
+            return Promise.race([taken, stalled]).finally(() => clearTimeout(timer));
+        },
+        close: async () => {
+            end();
+            await out.close();
+            statusEl.replaceChildren(`received ✓  ${meta.name} is in your downloads`);
+        },
+        abort: () => {
+            end();
+            out.abort("transfer stopped").catch(() => {}); // the download shows as failed instead of hanging
+        },
     };
 }
 
@@ -238,14 +326,15 @@ async function fileSink(handle, done) {
             await out.close();
             await done();
         },
+        abort: () => out.abort().catch(() => {}), // deletes the half-written temp file
     };
 }
 
-function clickToSave(meta) {
+function clickTo(label) {
     return new Promise((resolve) => {
         const b = document.createElement("button");
         b.id = "saveAs";
-        b.textContent = `save ${meta.name} (${mb(meta.size)})`;
+        b.textContent = label;
         b.onclick = resolve;
         statusEl.replaceChildren(b);
     });
@@ -262,7 +351,11 @@ function save(meta, blob) {
 
 // ---------- signaling ----------
 async function handle(msg) {
-    if (msg.type === "ready") {
+    if (msg.type === "created") {
+        // the server has registered the code: only now show it (shown earlier, a quick receiver got "no such code")
+        $("code").textContent = myCode;
+        status(`${file.name} (${mb(file.size)})  enter this code on the other device, keep this tab open`);
+    } else if (msg.type === "ready") {
         // we were on the code first: we make the offer
         createPeer();
         setupChannel(pc.createDataChannel("file"));
@@ -360,10 +453,10 @@ function share(f) {
     $("bar").hidden = true;
     file = f; // no size cap here: the receiver checks what it can save (see openSink)
     // 6 random digits: easy to type on a phone
-    const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1e6).padStart(6, "0");
-    $("code").textContent = code;
-    status(`${f.name} (${mb(f.size)})  enter this code on the other device, keep this tab open`);
-    join(code);
+    myCode = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1e6).padStart(6, "0");
+    $("code").textContent = "";
+    status(`${f.name} (${mb(f.size)})  getting a code...`);
+    join(myCode); // the code appears once the server confirms it (see "created" in handle)
 }
 
 $("receive").onclick = () => {

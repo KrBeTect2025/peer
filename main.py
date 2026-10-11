@@ -43,6 +43,12 @@ def index():
     return FileResponse(BASE / "static" / "index.html")
 
 
+@app.get("/sw.js")
+def service_worker():
+    # served from the root, not /static/, so the worker's scope is the whole site (it answers /dl/... requests)
+    return FileResponse(BASE / "static" / "sw.js", media_type="text/javascript")
+
+
 def metered_ice_servers(url: str):
     # the Metered API takes seconds to answer; its credentials don't change per request, so reuse them for an hour
     global metered_cache
@@ -107,6 +113,8 @@ async def signaling(websocket: WebSocket, room_id: str, role: str = ""):
 
     peers.append(websocket)
     print(f"room {room_id}: {len(peers)} peer(s)")
+    if role == "send":
+        await send_safe(websocket, json.dumps({"type": "created"}))  # the code exists now: the page may show it
 
     # second person arrived: tell the first one to start the call (only one side offers)
     if len(peers) == 2:

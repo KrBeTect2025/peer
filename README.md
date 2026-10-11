@@ -28,16 +28,16 @@ curl http://127.0.0.1:20241/quicktunnel   # prints the https://xxxx.trycloudflar
 ## Using it
 
 1. **Sender:** pick a file (any size). A 6-digit code appears. Keep that tab open.
-2. **Receiver:** type the code and press **Receive**.
-   - Chrome/Edge: click **save …** and pick where the file goes; it's written there as it arrives.
-   - Firefox/Safari: it's saved in the browser's storage and downloads when complete (a "save" link stays on the page
-     if the browser blocks the automatic download).
+2. **Receiver:** type the code and press **Receive**. The file appears in the browser's download bar right away
+   and fills as it arrives, like any normal download (Chrome, Edge, Firefox). Safari falls back to saving in the
+   browser's storage and downloading when complete. Keep both tabs open until it's done: the browser asks before
+   closing one mid-transfer.
 3. The same code works again for another receiver, one at a time, while the sender's tab is open,
    for 1 hour (a transfer still running at the 1-hour mark finishes). A code the sender is done with reads as
    "expired" (for an hour after); a mistyped one as "no such code".
 
-The receiver writes to disk as the file arrives, so memory stays flat. Size limits: Chrome/Edge, free disk space
-(tested to 50 GB); Firefox/Safari, the browser's storage quota for the site; browsers with neither, 1 GB in memory.
+The receiver writes to disk as the file arrives, so memory stays flat and the only size limit is free disk space
+(Safari: the browser's storage quota for the site). Tested with files up to 50 GB; see [tests/REPORT.md](tests/REPORT.md).
 Codes expire after 1 hour: nobody new can join after that, but a transfer already running finishes.
 
 ### Without Docker (optional)

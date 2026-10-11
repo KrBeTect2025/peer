@@ -1,0 +1,6 @@
+{
+  "name": "p2p-file-share-tests",
+  "private": true,
+  "type": "module",
+  "dependencies": { "playwright-core": "^1" }
+}
