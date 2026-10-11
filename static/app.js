@@ -105,14 +105,22 @@ async function sendFile(ch) {
     const chunk = Math.min(CHUNK, pc.sctp?.maxMessageSize || CHUNK);
     ch.bufferedAmountLowThreshold = HIGH_WATER / 2;
     let go = false;
-    let acked = 0; // bytes the receiver has written to disk
+    let acked = 0; // bytes the receiver has saved
+    let ackedAt = performance.now();
     let wake = () => {};
-    const nap = () => new Promise((r) => (wake = r));
+    // wakes on any event below, and at least once a second so the status can say when the receiver is stuck
+    const nap = () => new Promise((r) => {
+        wake = r;
+        setTimeout(r, 1000);
+    });
     ch.addEventListener("bufferedamountlow", () => wake());
     ch.addEventListener("close", () => wake());
     ch.onmessage = (e) => {
         if (e.data === "go") go = true;
-        else if (e.data.startsWith("ack ")) acked = Number(e.data.slice(4));
+        else if (e.data.startsWith("ack ")) {
+            acked = Number(e.data.slice(4));
+            ackedAt = performance.now();
+        }
         else if (e.data === "done") {
             closePeer(); // receiver has everything; stay on the code for the next receiver
             status(`sent ✓  code still active, keep this tab open to send again`);
@@ -130,15 +138,19 @@ async function sendFile(ch) {
         // wait while the network queue is full, or the receiver's disk is behind
         while (ch.bufferedAmount > HIGH_WATER || off - acked > WINDOW) {
             if (ch.readyState !== "open") return; // receiver left mid-transfer
+            if (off - acked > WINDOW && performance.now() - ackedAt > 5000) {
+                // the receiver isn't saving: usually its download is paused. Just wait, it carries on when resumed
+                status(`receiver's download is paused or busy, waiting...  ${mb(acked)} of ${mb(file.size)} saved`);
+            }
             await nap();
         }
         const data = await file.slice(off, off + chunk).arrayBuffer();
         if (ch.readyState !== "open") return; // the receiver may have left while that was read from disk
         ch.send(data);
         if (paintDue()) {
-            const done = Math.max(0, Math.min(off + chunk, file.size) - ch.bufferedAmount); // actually sent
-            progress(done, file.size);
-            status(`sending ${mb(done)} / ${mb(file.size)}  ${route}`);
+            // what the receiver has saved: matches its page and its download bar (sent can be up to 64 MB ahead)
+            progress(acked, file.size);
+            status(`sending ${mb(acked)} / ${mb(file.size)}  ${route}`);
         }
     }
     progress(1, 1);
@@ -150,13 +162,32 @@ function receiveInto(ch) {
     let meta;
     let sink;                      // where the bytes go: see openSink()
     let got = 0;                   // bytes received
+    let saved = 0;                 // bytes the sink has taken (for the download bar: what the browser has saved)
+    let handed = 0;                // bytes handed to the sink (saved <= handed <= got)
+    let waitingSince = 0;          // since when the sink has had a batch it hasn't taken yet
+    let watch;                     // repaints while the transfer runs, so a paused download gets noticed
     let batch = [];                // received but not yet handed to the disk
     let batchBytes = 0;
     let writes = Promise.resolve(); // disk writes, strictly in order
     let failed = false;
     let t0;
 
+    // shows what's saved, like the download bar; the bytes received but not yet saved (at most ~64 MB) wait in memory
+    const paint = () => {
+        if (!sink || failed) return;
+        progress(saved, meta.size);
+        // (a batch still filling up on a slow connection doesn't count: only batches the browser hasn't taken)
+        if (handed > saved && performance.now() - waitingSince > 5000) {
+            // the browser stopped taking data: usually the download was paused in the download bar.
+            // The sender stops 64 MB ahead and both just wait; resuming carries on where it stopped.
+            status(`waiting for your browser: is the download paused? ${mb(saved)} of ${mb(meta.size)} saved`);
+        } else {
+            const speed = mb(saved / ((performance.now() - t0) / 1000 || 1));
+            status(`receiving ${meta.name}  ${mb(saved)} / ${mb(meta.size)}  (${speed}/s, ${route || "connecting"})`);
+        }
+    };
     const stop = (why) => {
+        clearInterval(watch);
         failed = true;
         ch.onclose = null;
         sink?.abort(); // a half-saved file is thrown away / the download shows as failed, not stuck
@@ -168,16 +199,24 @@ function receiveInto(ch) {
     const flush = () => {
         const blob = new Blob(batch);
         const upto = got; // everything received so far is in this batch or an earlier one
+        if (handed === saved) waitingSince = performance.now(); // the sink was idle until now
+        handed = upto;
         batch = [];
         batchBytes = 0;
         writes = writes
             .then(() => !failed && sink.write(blob))
-            .then(() => ch.readyState === "open" && ch.send("ack " + upto))
+            .then(() => {
+                saved = upto;
+                waitingSince = performance.now();
+                if (ch.readyState === "open") ch.send("ack " + upto);
+            })
             .catch(saveFailed);
     };
     const finish = () => {
         writes = writes.then(async () => {
+            clearInterval(watch);
             if (failed) return;
+            progress(1, 1);
             status("finishing...");
             await sink.close();
             ch.send("done"); // sender closes the connection when it gets this
@@ -191,6 +230,7 @@ function receiveInto(ch) {
                 if (failed || ch.readyState !== "open") return s.abort(); // the sender left while we were opening it
                 sink = s;
                 t0 = performance.now();
+                watch = setInterval(paint, 1000);
                 ch.send("go");
                 if (meta.size === 0) finish();
             }, (err) => stop(err.name === "AbortError" ? "save cancelled" : "transfer refused: " + err.message));
@@ -203,14 +243,11 @@ function receiveInto(ch) {
         got += e.data.byteLength;
         if (batchBytes >= FLUSH || got === meta.size) flush();
         if (got === meta.size) finish();
-        if (paintDue() || got === meta.size) {
-            progress(got, meta.size);
-            const speed = mb(got / ((performance.now() - t0) / 1000 || 1));
-            status(`receiving ${meta.name}  ${mb(got)} / ${mb(meta.size)}  (${speed}/s, ${route || "connecting"})`);
-        }
+        else if (paintDue()) paint();
     };
     // fires after "done" (sender closed) or if the sender vanished mid-transfer
     ch.onclose = () => {
+        clearInterval(watch);
         if (!meta || got < meta.size) {
             failed = true;
             sink?.abort();
@@ -293,19 +330,11 @@ async function streamSink(meta) {
         clickTo(`download ${meta.name} (${mb(meta.size)})`).then(startDownload);
         await started;
     }
-    let flowing = false;
     return {
         // resolves once the download has taken the batch (the stream applies backpressure), so "ack" still
-        // limits the sender to what this side has actually saved
-        write: async (blob) => {
-            const taken = out.write(new Uint8Array(await blob.arrayBuffer()));
-            if (!flowing) return taken.then(() => (flowing = true)); // no limit yet: a Save-As dialog may be open
-            // once flowing, a download the browser silently dropped (e.g. it stopped the worker) would make
-            // writes wait forever: give up after 60 s instead of hanging
-            let timer;
-            const stalled = new Promise((_, no) => (timer = setTimeout(no, 60000, new Error("the download stopped responding"))));
-            return Promise.race([taken, stalled]).finally(() => clearTimeout(timer));
-        },
+        // limits the sender to what this side has actually saved. While the download is paused it just waits
+        // (receiveInto says so after 5 s); never time out here, a pause can be as long as the person likes.
+        write: async (blob) => out.write(new Uint8Array(await blob.arrayBuffer())),
         close: async () => {
             end();
             await out.close();

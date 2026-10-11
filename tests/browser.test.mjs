@@ -1,7 +1,7 @@
 // Browser tests: two real browsers (Chrome sender; Chrome, Edge or Firefox receiver) against a running app.
 //   npm i && npx playwright-core install firefox      (once; Chrome and Edge must be installed)
 //   node browser.test.mjs <test>...
-//   tests: basic edge zero unicode html second senderdrop cancel nosw dataclone firefox long
+//   tests: basic edge zero unicode html second pause senderdrop cancel nosw dataclone firefox long
 //   env:   APP_URL (default http://localhost:8000/), TEST_DIR (big files + downloads; default <tmp>/p2p-test),
 //          LONG_MB (size of the "long" test, default 3072), NOPING=1 (run "firefox" without the keep-alive ping)
 import { chromium, firefox } from "playwright-core";
@@ -195,6 +195,43 @@ async function midway(action) {
     }
 }
 
+// The receiver pauses its download for 90 s (longer than any timeout should be). Pausing in the download bar
+// makes the browser stop taking data; here the stream writes are held instead, which looks the same to the app.
+async function pause() {
+    const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
+    try {
+        await recv.addInitScript(() => {
+            const write = WritableStreamDefaultWriter.prototype.write;
+            let held = null, release;
+            window.pauseDownload = () => (held = new Promise((r) => (release = r)));
+            window.resumeDownload = () => { held = null; release(); };
+            WritableStreamDefaultWriter.prototype.write = function (chunk) {
+                return held ? held.then(() => write.call(this, chunk)) : write.call(this, chunk);
+            };
+        });
+        const sp = await page(send, { waitForSW: false }), rp = await page(recv);
+        const f = makeFile("pause.bin", 300 * MB);
+        const code = await share(sp, f);
+        const dlEvent = rp.waitForEvent("download");
+        await rp.fill("#codeIn", code);
+        await rp.click("#receive");
+        const d = await dlEvent;
+        await until(rp, /receiving .*?  ([2-9]\d|\d{3,})\.\d MB \//, 60000); // 20+ MB saved
+        await rp.evaluate(() => pauseDownload());
+        check(await until(rp, /is the download paused\?/, 20000), `receiver notices the pause: ${await recvStatus(rp)}`);
+        check(await until(sp, /paused or busy/, 20000, "#sendStatus"), `sender notices it: ${await sendStatus(sp)}`);
+        await new Promise((r) => setTimeout(r, 90000));
+        check(/is the download paused\?/.test(await recvStatus(rp)), `still just waiting after 90 s, nothing cancelled`);
+        await rp.evaluate(() => resumeDownload());
+        check((await sha1(await d.path())) === f.sha1, "resumed and finished: byte-identical");
+        check(await until(rp, /in your downloads/), `receiver says: ${await recvStatus(rp)}`);
+        check(await until(sp, /sent ✓/, 30000, "#sendStatus"), `sender says: ${await sendStatus(sp)}`);
+        rmSync(f.path);
+    } finally {
+        await Promise.allSettled([send.close(), recv.close()]);
+    }
+}
+
 // fallbacks: browser without a service worker, and one that can't hand a stream to it (Safari's DataCloneError)
 async function fallback(kind) {
     const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
@@ -270,6 +307,7 @@ const tests = {
     unicode: () => special("तस्वीर (1) 'x' #&.jpg", randomBytes(5000), "Hindi/quotes/brackets name"),
     html: () => special("evil.html", Buffer.from("<script>document.title='pwned';parent.document.title='pwned'</script><h1>hi</h1>"), ".html from the sender"),
     second,
+    pause,
     senderdrop: () => midway("senderdrop"),
     cancel: () => midway("cancel"),
     nosw: () => fallback("nosw"),
