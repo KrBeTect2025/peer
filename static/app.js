@@ -11,6 +11,10 @@ let file = null;               // sender: the file being shared; receiver: null
 let statusEl;                  // status line of whichever side (send/receive) is active
 let joinId = 0;                // bumped by leave(), so a join still awaiting config can't revive an old code
 let myCode = "";               // sender: the code being set up / shared
+let offerer = false;           // this side made the offer, so it is the one that restarts ICE
+let retries = 0;               // ICE restarts tried since the connection last worked
+const MAX_RETRIES = 4;         // ICE restarts before giving up on a failed connection
+const RETRY_DELAY = 8000;      // wait between restarts, so a phone switching Wi-Fi <-> 4G can settle
 
 const CHUNK = 64 * 1024;             // bytes per DataChannel message
 const HIGH_WATER = 1024 * 1024;      // pause reading the file while this much is queued unsent
@@ -39,7 +43,7 @@ const loadConfig = () => fetch("/config").then((r) => r.json()).then((c) => c.ic
 let configReady = loadConfig();
 // the service worker turns incoming files into normal browser downloads (see sw.js, streamSink);
 // registering at page load means it's active long before a transfer. No service worker: the other save paths.
-navigator.serviceWorker?.register("/sw.js").catch(() => {});
+navigator.serviceWorker?.register("/sw.js").catch(() => { });
 // the file only exists between the two tabs: closing either one mid-transfer kills it, so ask first
 addEventListener("beforeunload", (e) => {
     if (pc) e.preventDefault();
@@ -54,6 +58,8 @@ const send = (obj) => {
 // ---------- peer connection ----------
 function createPeer() {
     if (pc) pc.close();
+    offerer = false; // the "ready" side sets it right after
+    retries = 0;
     const conn = new RTCPeerConnection({
         iceServers,
         // open the page with ?relay=1 to force everything through TURN (for testing the relay)
@@ -67,11 +73,32 @@ function createPeer() {
     pc.ondatachannel = (e) => setupChannel(e.channel);
     pc.onconnectionstatechange = () => {
         if (conn !== pc) return;
-        if (conn.connectionState === "connected") findRoute(conn).catch(() => {});
-        if (conn.connectionState === "failed") {
-            status("connection failed (different networks need a reachable TURN server)");
-        }
+        if (conn.connectionState === "connected") findRoute(conn).catch(() => { });
+        if (conn.connectionState === "connected") retries = 0;
+        if (conn.connectionState === "failed") retry(conn);
     };
+}
+
+// a failed connection often works on a later try: NAT mappings get re-punched, a phone that switched
+// networks gathers its new address. Both sides count the attempts; only the offerer restarts, with a
+// new offer (the answerer just answers it), so the two sides never send offers at each other.
+// The data channel survives an ICE restart, so a transfer that was running carries on.
+function retry(conn) {
+    if (retries >= MAX_RETRIES) {
+        status("connection failed (different networks need a reachable TURN server)");
+        return;
+    }
+    retries++;
+    status(`connection lost, retrying (${retries}/${MAX_RETRIES})...`);
+    if (!offerer) return;
+    setTimeout(() => {
+        if (conn !== pc || conn.connectionState !== "failed") return; // closed, replaced, or recovered meanwhile
+        chain = chain.then(async () => {
+            conn.restartIce();
+            await conn.setLocalDescription(await conn.createOffer({ iceRestart: true }));
+            send({ type: "offer", sdp: conn.localDescription, restart: true });
+        }).catch((err) => console.warn("ICE restart failed", err));
+    }, RETRY_DELAY);
 }
 
 // host = same network, srflx/prflx = direct through NAT, relay = through the TURN server
@@ -107,7 +134,7 @@ async function sendFile(ch) {
     let go = false;
     let acked = 0; // bytes the receiver has saved
     let ackedAt = performance.now();
-    let wake = () => {};
+    let wake = () => { };
     // wakes on any event below, and at least once a second so the status can say when the receiver is stuck
     const nap = () => new Promise((r) => {
         wake = r;
@@ -342,7 +369,7 @@ async function streamSink(meta) {
         },
         abort: () => {
             end();
-            out.abort("transfer stopped").catch(() => {}); // the download shows as failed instead of hanging
+            out.abort("transfer stopped").catch(() => { }); // the download shows as failed instead of hanging
         },
     };
 }
@@ -355,7 +382,7 @@ async function fileSink(handle, done) {
             await out.close();
             await done();
         },
-        abort: () => out.abort().catch(() => {}), // deletes the half-written temp file
+        abort: () => out.abort().catch(() => { }), // deletes the half-written temp file
     };
 }
 
@@ -387,12 +414,14 @@ async function handle(msg) {
     } else if (msg.type === "ready") {
         // we were on the code first: we make the offer
         createPeer();
+        offerer = true;
         setupChannel(pc.createDataChannel("file"));
         await pc.setLocalDescription(await pc.createOffer());
         send({ type: "offer", sdp: pc.localDescription });
         status("connecting...");
     } else if (msg.type === "offer") {
-        createPeer();
+        // an ICE-restart offer renegotiates the existing connection (and its open channel); a first offer starts one
+        if (!msg.restart || !pc) createPeer();
         await pc.setRemoteDescription(msg.sdp);
         await pc.setLocalDescription(await pc.createAnswer());
         send({ type: "answer", sdp: pc.localDescription });
