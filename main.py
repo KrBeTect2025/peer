@@ -112,23 +112,45 @@ async def signaling(websocket: WebSocket, room_id: str, role: str = ""):
     if len(peers) == 2:
         await send_safe(peers[0], json.dumps({"type": "ready"}))
 
-    reason = "left"
-    try:
-        # the sender's connection is the code, so cut it when the code's hour is up
-        async with asyncio.timeout(CODE_TTL if role == "send" else None):
-            while True:
-                text = await websocket.receive_text()
-                for peer in peers:
-                    if peer is not websocket:
-                        await send_safe(peer, text)  # forward offer/answer/candidate as-is
-    except WebSocketDisconnect:
-        pass
-    except TimeoutError:
-        reason = "expired"
+    async def relay():
+        while True:
+            text = await websocket.receive_text()
+            for peer in peers:
+                if peer is not websocket:
+                    await send_safe(peer, text)  # forward offer/answer/candidate as-is
+
+    async def expire():
+        # the code's hour is up: from now on it reads as expired, so no new receiver can join,
+        # but a receiver already connected (maybe mid-transfer) may finish before the sender is cut off
+        while len(peers) > 1:
+            try:
+                # keep the expired mark alive meanwhile, so no new sender can claim this code
+                await db.set(key, "expired", ex=CODE_TTL)
+            except redis.RedisError as err:
+                print("redis error:", err)
+            try:
+                async with asyncio.timeout(5):  # re-check every 5 s whether the receiver has left
+                    await relay()
+            except TimeoutError:
+                pass
         try:
             await websocket.close(code=4410)
         except Exception:
             pass
+
+    reason = "left"
+    try:
+        if role == "send":
+            try:
+                async with asyncio.timeout(CODE_TTL):
+                    await relay()
+            except TimeoutError:
+                reason = "expired"
+                await expire()
+        else:
+            await relay()  # until the receiver disconnects
+    except WebSocketDisconnect:
+        pass
     finally:
         peers.remove(websocket)
         # sender gone = code expires at once, even if a receiver is still connected

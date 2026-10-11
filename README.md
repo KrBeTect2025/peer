@@ -33,11 +33,12 @@ curl http://127.0.0.1:20241/quicktunnel   # prints the https://xxxx.trycloudflar
    - Firefox/Safari: it's saved in the browser's storage and downloads when complete (a "save" link stays on the page
      if the browser blocks the automatic download).
 3. The same code works again for another receiver, one at a time, while the sender's tab is open,
-   for 1 hour at most. A code the sender is done with reads as "expired" (for an hour after); a mistyped one as "no such code".
+   for 1 hour (a transfer still running at the 1-hour mark finishes). A code the sender is done with reads as
+   "expired" (for an hour after); a mistyped one as "no such code".
 
 The receiver writes to disk as the file arrives, so memory stays flat. Size limits: Chrome/Edge, free disk space
 (tested to 50 GB); Firefox/Safari, the browser's storage quota for the site; browsers with neither, 1 GB in memory.
-Codes still expire after 1 hour, which also ends a transfer still running then: at a few MB/s that's roughly 10–30 GB.
+Codes expire after 1 hour: nobody new can join after that, but a transfer already running finishes.
 
 ### Without Docker (optional)
 ```bash

@@ -108,7 +108,11 @@ The Metered API takes seconds to answer, so the list is cached for an hour (a fa
 - **The sender owns the code.** The sender connects with `?role=send`, which runs `SET code:<room> active NX`: only if no key exists, so a code that's active *or recently expired* is never handed out twice (taken → closed with 4409, and the page picks another code). Then it creates the room.
 - A receiver checks Redis: no key → closed with **4404** ("no such code"); `expired` (or `active` but the room is gone after a server restart) → closed with **4410** ("code expired"). Redis down → **1011** ("server error").
 - The moment the sender disconnects (new file picked, tab closed), the room is deleted and the key becomes `expired`, so the old code stops working instantly, and a receiver still connected gets `bye`.
-- **1-hour limit:** the sender's receive loop runs inside `asyncio.timeout(CODE_TTL)`. When it fires, the server closes the sender with 4410 and sends the receiver `{"type":"bye","reason":"expired"}`. The `active` key lives 60 s longer than that timeout, so it can't vanish (and be grabbed by a new sender) before it's marked `expired`.
+- **1-hour limit:** the sender's receive loop runs inside `asyncio.timeout(CODE_TTL)`. When it fires, `expire()` takes over:
+  - with no receiver connected, the sender is closed with 4410 straight away;
+  - with a receiver connected (it may be mid-transfer, possibly for hours), the code is marked `expired` in Redis, so no new receiver can join, but signaling keeps working until that receiver leaves. Every 5 s the server re-marks the key (so no new sender can claim the code meanwhile) and checks whether the receiver is gone; then it closes the sender with 4410.
+  
+  The `active` key lives 60 s longer than the timeout, so it can't vanish (and be grabbed by a new sender) before it's marked `expired`.
 - A room holds at most **2** sockets. A third gets `{"type":"full"}` and is closed with code 1008. In the file share, that means "someone is already receiving on this code"; the page shows "code busy, try again in a moment".
 - When the second socket arrives, the server sends `ready` **only to the first one**. Exactly one side must create the offer. If both did, the two offers would cross ("glare") and the connection would break.
 - Every other message is forwarded unchanged to the other socket. The server never looks inside, which is why it's so small.
