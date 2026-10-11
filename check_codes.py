@@ -1,6 +1,6 @@
 # Smoke check for code states against a running server:
 #   python check_codes.py [ws_base] [code_ttl]
-#   e.g. python check_codes.py wss://localhost:8000      (default)
+#   e.g. python check_codes.py ws://localhost:8000      (default), or wss://<tunnel>.trycloudflare.com
 # Pass code_ttl only if the server runs with that short CODE_TTL, to also check the 1-hour cutoff.
 import asyncio
 import json
@@ -10,9 +10,9 @@ import sys
 
 import websockets
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "wss://localhost:8000"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:8000"
 TTL = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-SSL = ssl._create_unverified_context() if BASE.startswith("wss") else None  # self-signed cert
+SSL = ssl._create_unverified_context() if BASE.startswith("wss") else None  # skip cert checks for wss
 
 
 def url(code, send=False):

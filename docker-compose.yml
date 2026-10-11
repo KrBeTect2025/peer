@@ -1,17 +1,15 @@
 services:
-  # FastAPI: serves the page + WebSocket signaling over HTTPS
+  # FastAPI: serves the page + WebSocket signaling (plain HTTP; the Cloudflare tunnel adds HTTPS)
   web:
     build: .
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # this PC only: everyone else comes in through the tunnel
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
     depends_on: [redis]
-    dns: [1.1.1.1, 8.8.8.8]   # hotspot DNS is flaky; /config needs to reach the Metered API
-    volumes:
-      - ./certs:/app/certs:ro
+    dns: [1.1.1.1, 8.8.8.8]   # some networks' DNS is flaky; /config needs to reach the Metered API
 
   # redis = which codes are active / expired (codes are short-lived, so no persistence needed)
   redis:
@@ -21,23 +19,11 @@ services:
     ports:
       - "127.0.0.1:6379:6379"   # this PC only, for running main.py outside Docker
 
-  # coturn = our own STUN + TURN server
-  coturn:
-    image: coturn/coturn:4.18.0
+  # tunnel = public https://xxxx.trycloudflare.com link to "web" (new link on every restart, see its logs)
+  tunnel:
+    image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:20241", "--url", "http://web:8000"]
+    depends_on: [web]
     ports:
-      - "3478:3478/udp"
-      - "3478:3478/tcp"
-      - "49160-49400:49160-49400/udp"   # 1 port per relayed browser: ~120 rooms at once
-    command:
-      - -n
-      - --listening-port=3478
-      - --fingerprint
-      - --lt-cred-mech
-      - --user=${TURN_USER}:${TURN_PASS}
-      - --realm=webrtc.local
-      - --external-ip=${EXTERNAL_IP}
-      - --min-port=49160
-      - --max-port=49400
-      - --no-tls
-      - --log-file=stdout
+      - "127.0.0.1:20241:20241"   # curl http://127.0.0.1:20241/quicktunnel prints the current link

@@ -1,6 +1,6 @@
 # How this P2P file share works
 
-This file walks through every piece of the project. It starts with the ideas, then goes through the server, the browser code, and the STUN/TURN server, and ends with LAN vs internet behavior and a troubleshooting table.
+This file walks through every piece of the project. It starts with the ideas, then goes through the server, the browser code, and Docker + the Cloudflare tunnel, and ends with how the browsers find a route to each other and a troubleshooting table.
 
 ```
 app/
@@ -8,9 +8,8 @@ app/
   static/index.html    the page (Send box, Receive box, progress bar)
   static/app.js        all the WebRTC + file transfer logic in the browser
   Dockerfile           how the FastAPI app is packaged into a container
-  docker-compose.yml   runs two containers: "web" (FastAPI) and "coturn" (STUN + TURN)
-  .env                 your IPs and TURN password (not committed)
-  certs/               self-signed HTTPS certificate (not committed)
+  docker-compose.yml   runs "web" (FastAPI), "redis" (active codes) and "tunnel" (Cloudflare)
+  .env                 your Metered TURN credentials URL (not committed)
 ```
 
 ---
@@ -26,8 +25,8 @@ The 6-digit code is just the name of a signaling room (`file-<code>`). Whoever h
 | **Signaling** | Passing setup messages between the two browsers before they're connected | WebSocket `/ws/{room}` in `main.py` |
 | **SDP** (offer / answer) | A text blob describing "here's what I want to open, and my encryption keys". One side sends an **offer**, the other replies with an **answer** | `createOffer()` / `createAnswer()` in `app.js` |
 | **ICE candidate** | One possible network address where a browser can be reached (IP + port + type) | `onicecandidate` / `addIceCandidate()` |
-| **STUN** | A server that tells a browser "this is what your public IP:port looks like from outside". Only used during setup | coturn on port 3478 + Google's public STUN |
-| **TURN** | A server that **relays** the (still encrypted) data when a direct connection is impossible. It uses bandwidth and is the fallback | coturn, ports 3478 + 49160-49400 |
+| **STUN** | A server that tells a browser "this is what your public IP:port looks like from outside". Only used during setup | Metered's STUN + Google's public STUN |
+| **TURN** | A server that **relays** the (still encrypted) data when a direct connection is impossible. It uses bandwidth and is the fallback | Metered's hosted TURN (`METERED_TURN_URL`) |
 | **DataChannel** | A peer-to-peer pipe for arbitrary data, reliable and ordered by default | `createDataChannel("file")` |
 
 ### The full sequence
@@ -51,10 +50,12 @@ The 6-digit code is just the name of a signaling room (`file-<code>`). Whoever h
  addIceCandidate ◀─────────────── forward ◀───────────────── {"type":"candidate"} x N
 
  ════════════ ICE checks: direct (host/srflx) or via TURN (relay) ════════════
- {name,size,type} ═══════════════════════════════════════════▶ (DataChannel)
- 64 KB chunk, 64 KB chunk, ... ══════════════════════════════▶ collect, progress bar
+ {name,size,type} ═══════════════════════════════════════════▶ (DataChannel) pick where to save
+                  ◀══════════════════════════════════════════ "go"
+ 64 KB chunk, 64 KB chunk, ... ══════════════════════════════▶ write to disk in 8 MB batches
+                  ◀══════════════════════════════════════════ "ack <bytes on disk>" (after each batch)
                   ◀══════════════════════════════════════════ "done"
- close connection, keep waiting on the code                   save file, leave room
+ close connection, keep waiting on the code                   file saved, leave room
 ```
 
 ---
@@ -67,12 +68,10 @@ The 6-digit code is just the name of a signaling room (`file-<code>`). Whoever h
 BASE = Path(__file__).parent
 load_dotenv(BASE / ".env")
 
-TURN_HOST = os.getenv("TURN_HOST", "127.0.0.1")
-TURN_USER = os.getenv("TURN_USER", "webrtc")
-TURN_PASS = os.getenv("TURN_PASS", "webrtc")
+METERED_TURN_URL = os.getenv("METERED_TURN_URL")
 ```
 - `BASE` is the folder `main.py` lives in. All file paths are built from it, so the server works no matter which directory you start it from.
-- `load_dotenv` reads `.env` into environment variables. The same `.env` is also read by `docker compose`, so the server and coturn always agree on the user and password.
+- `load_dotenv` reads `.env` into environment variables. In Docker, `env_file: .env` does the same job.
 
 ### App and static files
 
@@ -98,15 +97,11 @@ Every message the server sends to a browser goes through this. If the *other* pe
 
 ### `GET /` and `GET /config`
 
-`/` returns `static/index.html`. `/config` returns exactly the object the browser passes to `new RTCPeerConnection(...)`:
-- `stun:stun.l.google.com:19302` is Google's free public STUN, a backup in case coturn is down.
-- `stun:TURN_HOST:3478` is our coturn acting as STUN.
-- `turn:TURN_HOST:3478?transport=udp` and `?transport=tcp` are our coturn acting as TURN. UDP is preferred. TCP helps on networks that block UDP.
-- `username` / `credential` are the TURN login (TURN needs auth so strangers can't use your bandwidth).
+`/` returns `static/index.html`. `/config` returns exactly the object the browser passes to `new RTCPeerConnection(...)`.
 
-Serving this from the server, instead of hardcoding it in JS, means you change IPs in **one** place (`.env`).
+It fetches a ready-made `iceServers` list from Metered's hosted STUN/TURN (`METERED_TURN_URL` in `.env`): STUN addresses plus TURN servers with fresh credentials. TURN is reachable from anywhere, so two browsers on any networks (even behind CGNAT or mobile data) can connect. Serving the list from the server keeps the API key out of the page.
 
-If `METERED_TURN_URL` is set in `.env`, `/config` instead fetches a ready-made list with fresh credentials from Metered's hosted TURN (reachable from anywhere, so it works across networks and CGNAT). The API key stays on the server. If that request fails, it falls back to the coturn list above. Open the page with `?relay=1` to force all traffic through TURN and test the relay.
+The Metered API takes seconds to answer, so the list is cached for an hour (a failed refresh keeps the old list and retries in a minute). If Metered can't be reached at all, `/config` falls back to Google's public STUN only: browsers that can connect directly still do; ones behind strict NAT fail with "connection failed". Open the page with `?relay=1` to force all traffic through TURN and test the relay.
 
 ### `WS /ws/{room_id}`: the signaling relay
 
@@ -202,42 +197,61 @@ if (ch.readyState === "open") start(); else ch.onopen = start;
 ```
 Receivers get binary chunks as `ArrayBuffer`s. Senders start sending as soon as the channel is open. On the side that receives the channel through `ondatachannel`, it may already be open, hence the `readyState` check.
 
+### The channel protocol
+
+| Direction | Message | Meaning |
+|---|---|---|
+| sender → receiver | `{"name","size","type"}` (string) | What's coming |
+| receiver → sender | `"go"` | The receiver has somewhere to save it; start sending |
+| sender → receiver | binary, 64 KB each | The file, in order |
+| receiver → sender | `"ack <n>"` | The first `n` bytes are written to disk |
+| receiver → sender | `"done"` | The whole file is saved; the sender closes the connection |
+
 ### Sending: `sendFile(ch)`
 
 ```js
-const chunk = Math.min(CHUNK, pc.sctp?.maxMessageSize || CHUNK);
 ch.send(JSON.stringify({ name, size, type }));
+while (!go) await nap();                                  // wait for the receiver's "go"
 for (let off = 0; off < file.size; off += chunk) {
-    if (ch.bufferedAmount > HIGH_WATER) await bufferedamountlow;
-    if (ch.readyState !== "open") return;
+    while (ch.bufferedAmount > HIGH_WATER || off - acked > WINDOW) await nap();
     ch.send(await file.slice(off, off + chunk).arrayBuffer());
 }
 ```
 1. **First message is a string** with the file's name, size and MIME type. Everything after it is binary.
-2. **Chunks are 64 KB**, or smaller if the other browser advertises a lower `maxMessageSize`. One huge `send()` would fail; small chunks also make the progress bar move.
-3. **Back-pressure.** `send()` doesn't wait for the network; it queues. Reading a 2 GB file in a tight loop would queue it all in memory and Chrome would close the channel. So when more than `HIGH_WATER` (8 MB) is queued, the loop waits for the `bufferedamountlow` event (fired when the queue drops under 4 MB).
-4. `file.slice(...).arrayBuffer()` reads only that piece from disk, so the sender never loads the whole file into memory.
-5. If the receiver disappears mid-transfer, the channel stops being `open` and the loop stops.
+2. **Chunks are 64 KB**, or smaller if the other browser advertises a lower `maxMessageSize`.
+3. **Two brakes.** `HIGH_WATER` (1 MB): `send()` only queues, so the loop pauses while that much is waiting to go
+   out on the network. `WINDOW` (64 MB): the loop also pauses while it's more than 64 MB ahead of the receiver's last
+   `ack`. That second brake is what keeps the *receiver's* memory flat when its disk is slower than the network.
+4. `nap()` sleeps until something changes: an `ack`, `"go"`, the network queue draining (`bufferedamountlow`), or the
+   channel closing.
+5. `file.slice(...).arrayBuffer()` reads only that piece from disk, so the sender never loads the whole file into memory.
+6. If the receiver disappears mid-transfer, the channel stops being `open` and the loop stops.
+7. The status line repaints at most 4 times a second (`paintDue()`); a 50 GB file is ~800,000 chunks.
+
+There's no size cap on the sender: the receiver decides what it can save.
 
 When the receiver replies `"done"`, the sender closes the connection but **keeps its WebSocket**, so it's still in the room. The receiver then leaves, and the next person who types the code gets the file too.
 
-### Receiving: `receiveInto(ch)`
+### Receiving: `receiveInto(ch)` and `openSink(meta)`
 
-```js
-if (typeof e.data === "string") meta = JSON.parse(e.data);
-else { parts.push(e.data); got += e.data.byteLength; }
-if (got === meta.size) { save(meta, parts); ch.send("done"); }
-```
-- The DataChannel is reliable and ordered, so chunks arrive complete and in order. Joining them in arrival order rebuilds the file.
-- The status shows bytes received and speed in MB/s.
-- When `got` reaches `meta.size`, the file is saved and `"done"` is sent back. An empty file works too: `size` is 0, so the first message already completes it.
-- `ch.onclose` fires when the sender closes the connection after `"done"`, or if the sender vanishes. If not everything arrived, it shows "sender disconnected before the file finished". Either way it calls `leave()`.
+When the `{name,size,type}` message arrives, `openSink()` picks where the file goes, best first:
 
-### `save(meta, parts)`
+| Browser | Where the bytes go | Size limit |
+|---|---|---|
+| **Chrome / Edge** (`showSaveFilePicker`) | A "save name (size)" button appears; it opens the system save dialog (it may only open from a click), and every batch is written straight into the chosen file | Free disk space |
+| **Firefox / Safari** (`navigator.storage.getDirectory`, OPFS) | The site's private disk storage, then handed over as a normal download at the end | The browser's storage quota for the site (checked before starting), and the size free twice until the download copy is done |
+| **Neither** | Memory | `MEM_MAX`, 1 GB |
 
-Builds a `Blob` from the chunks, makes a `blob:` URL, and clicks a hidden `<a download="name">` to start the download. The link stays visible ("save filename") in case the browser blocks the automatic download, which some phones do.
+Then the receiver sends `"go"`, and for every chunk:
+- adds it to a batch; at 8 MB (`FLUSH`) the batch is written to disk as one `Blob`, and `"ack <bytes so far>"` goes
+  back once the write has finished. Writes are chained on one promise, so they land in order.
+- refuses (and leaves) if more bytes arrive than were announced, so a modified sender page can't push more.
+- when `got` reaches `meta.size`, waits for the last write, closes the file (Chrome writes into `name.crswap` and
+  renames it here), sends `"done"`, and shows "received ✓". An empty file works too.
 
-**Limit:** all chunks stay in memory until the Blob is saved, so files are capped at **25 MB** (`MAX_SIZE`). The file never touches the server, so the browsers enforce it: `share()` refuses a bigger file, and the receiver stops and leaves if the announced size is over the cap or more bytes arrive than announced (a modified sender page can't push more). Going past ~1-2 GB would need streaming to disk with `showSaveFilePicker()` (Chrome) or a service worker; the code marks this with a `ponytail:` comment.
+`ch.onclose` fires when the sender closes the connection after `"done"`, or if the sender vanishes. If not everything arrived, it shows "transfer stopped". Either way it calls `leave()`.
+
+**Tested:** a 50 GB file through the Chrome save dialog and 9.5 GB through OPFS, both byte-identical, with the receiving browser flat at ~420 MB the whole time. The old in-memory version needed ~2.4× the file size in RAM and broke at 8 GB on a 16 GB laptop. Chrome and Edge gave a site 10 GB of OPFS on the test machine, which is why they use the save dialog instead.
 
 ### `closePeer()` and `leave()`
 
@@ -252,7 +266,7 @@ DataChannels are always encrypted (DTLS). Even when the data goes through TURN, 
 
 ## 5. Docker: `Dockerfile` + `docker-compose.yml`
 
-`docker compose up -d --build` starts two containers.
+`docker compose up -d --build` starts three containers: `web`, `redis` and `tunnel`.
 
 ### The `web` container (FastAPI)
 
@@ -266,62 +280,44 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 COPY static ./static                       # the page + app.js are baked into the image
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
-     "--ssl-keyfile", "certs/key.pem", "--ssl-certfile", "certs/cert.pem"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]   # plain HTTP: the tunnel adds HTTPS
 ```
 - Requirements are copied and installed **before** the code. Docker caches each step, so editing `app.js` doesn't reinstall FastAPI.
 - `--host 0.0.0.0` listens on all interfaces. `127.0.0.1` would only accept connections from inside the container.
-- `.dockerignore` keeps `certs/`, `.env` and `__pycache__` out of the image, so secrets are never baked in.
+- `.dockerignore` keeps `.env` and `__pycache__` out of the image, so secrets are never baked in.
 
 In `docker-compose.yml`:
 ```yaml
 web:
   build: .
-  ports: ["8000:8000"]
-  env_file: .env                 # TURN_HOST / TURN_USER / TURN_PASS for /config
-  volumes:
-    - ./certs:/app/certs:ro      # the certificate is mounted read-only, not copied in
+  ports: ["127.0.0.1:8000:8000"]   # this PC only: everyone else comes in through the tunnel
+  env_file: .env                   # METERED_TURN_URL for /config
+  environment:
+    REDIS_URL: redis://redis:6379/0
+  dns: [1.1.1.1, 8.8.8.8]          # some networks' DNS is flaky; /config needs to reach Metered
+redis:
+  image: redis:7-alpine            # no persistence: codes live an hour at most anyway
 ```
 Because static files are baked in, **re-run `docker compose up -d --build` after editing code**.
 
-### The `coturn` container (STUN + TURN)
+---
 
-| Setting | Why |
-|---|---|
-| `image: coturn/coturn:4.18.0` | The standard open-source STUN/TURN server. **Pinned** to a version: coturn 4.18 removed the `--no-dtls` and `--no-cli` flags, which made an unpinned setup crash on startup |
-| `3478:3478/udp` and `/tcp` | The STUN/TURN listening port, on both protocols |
-| `49160-49400:49160-49400/udp` | Ports coturn uses to relay data, one per browser that uses the relay: ~120 rooms at once. Not much bigger, because Docker Desktop publishes every port individually |
-| `command:` as a YAML list | Each flag is its own list item, so no stray empty arguments sneak in from line breaks |
-| `-n` | Don't look for a config file. Everything is set by flags |
-| `--lt-cred-mech` + `--user=USER:PASS` | Require a username/password (long-term credentials) |
-| `--realm=webrtc.local` | An auth realm name. Any string works, no domain needed |
-| `--external-ip=${EXTERNAL_IP}` | **Important.** Inside Docker, coturn only sees its container IP (`172.x`). This tells it which IP to put in relay candidates |
-| `--min-port/--max-port` | Must match the published relay range |
-| `--fingerprint` | Adds a checksum to STUN messages. Browsers expect it |
-| `--no-tls` | No TURN-over-TLS (that would need a cert and a domain). The data is still encrypted by WebRTC end to end |
-| `--log-file=stdout` | Logs go to `docker compose logs coturn` |
+## 6. HTTPS: the Cloudflare tunnel
 
-Note: coturn 4.18 always logs `ERROR CONFIG: Unknown argument:` (with nothing after it) at startup. It's a harmless quirk of the image.
+The `tunnel` container runs `cloudflared tunnel --url http://web:8000`.
+The server only speaks plain HTTP on port 8000. `cloudflared` opens an outbound connection to Cloudflare and gives you a public `https://xxxx.trycloudflare.com` address with a real certificate, so no router port forwarding, no self-signed certificate warnings, and it works behind CGNAT. The page then uses `wss://` for signaling automatically (`location.protocol` is `https:`). A quick tunnel's address changes every time it restarts; `curl http://127.0.0.1:20241/quicktunnel` (its metrics port) prints the current one.
 
 ---
 
-## 6. HTTPS / the certificate
+## 7. How the browsers find a route
 
-The server runs on HTTPS with a self-signed certificate whose `subjectAltName` lists your LAN IP, `127.0.0.1` and `localhost` (the `openssl` command is in the README). Because nobody "trusted" signed it, each device shows a warning once. After you click Proceed, the page and its `wss://` WebSocket work.
+ICE tries every route and keeps the best one that works. `findRoute()` in `app.js` shows which one won in the status line.
 
-If your LAN IP changes (a different Wi-Fi network, or the hotspot hands out a new address), regenerate the cert with the new IP and update `.env`.
+**Same network:** each browser's `host` candidate (its local IP) is directly reachable by the other, so ICE picks `host <-> host` ("direct, same network"). The file never leaves your network, even though both people opened the Cloudflare link.
 
----
+**Different networks, normal home routers:** STUN gives each side its public IP:port (`srflx`), and both sides send packets to each other at the same time. Most home NATs let that through ("UDP hole punching"). The transfer is direct.
 
-## 7. LAN vs internet: what actually happens
-
-**Same Wi-Fi or hotspot:** each browser's `host` candidate (its LAN IP) is directly reachable by the other, so ICE picks `host <-> host`. The file never leaves your network. A phone that *is* the hotspot counts as being on the same network as the laptop connected to it.
-
-**Different networks, normal home routers:** host candidates fail. STUN gives each side its public IP:port (`srflx`), and both sides send packets to each other at the same time. Most home NATs let that through ("UDP hole punching"). The transfer is direct.
-
-**Strict NAT / mobile data / CGNAT:** hole punching often fails. Both sides fall back to `relay` candidates, and data goes browser → TURN → browser. For this to work from outside, the TURN server has to be reachable from the internet. Behind CGNAT your own coturn isn't, so you need a hosted TURN server.
-
-Signaling (port 8000) must always be reachable by both browsers. On a LAN it already is. Over the internet you need a router port forward, a tunnel (cloudflared), or a cloud host.
+**Strict NAT / mobile data / CGNAT:** hole punching often fails. Both sides fall back to `relay` candidates, and data goes browser → Metered TURN → browser (still encrypted end to end). This uses your Metered bandwidth quota.
 
 ---
 
@@ -329,16 +325,14 @@ Signaling (port 8000) must always be reachable by both browsers. On a LAN it alr
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Page doesn't load on the other device | Windows Firewall is blocking inbound TCP 8000, or the network is set to Public while Docker is only allowed on Public/Private. Add an inbound rule for the ports |
-| Receiver stuck on "waiting for sender..." | Wrong code, or the sender's tab was closed or refreshed (the code is gone) |
+| Link doesn't load | The tunnel container restarted, so the address changed. Get the new one with `curl http://127.0.0.1:20241/quicktunnel` |
 | "code busy, try again in a moment" | Someone else is receiving on that code right now. Wait for them to finish |
-| "connection failed" | ICE found no working route. On a LAN, the firewall is blocking UDP. Across networks, TURN isn't reachable: check `EXTERNAL_IP`, port forwards, or use a hosted TURN server |
+| "connection failed" | ICE found no working route, so TURN wasn't usable: check `METERED_TURN_URL` and your Metered quota, and look for "Metered TURN failed" in `docker compose logs web` |
 | "sender disconnected before the file finished" | The sender's tab closed, slept, or lost network mid-transfer. Phones pause background tabs, so keep the sender's screen on |
 | Download doesn't start on a phone | Tap the "save filename" link |
-| Large file crashes the receiving tab | Out of memory: the receiver holds the whole file until saving (see `save()`) |
+| "not enough browser storage" | Firefox/Safari path: the file is bigger than the site's storage quota. Receive it in Chrome or Edge, which save straight to a file |
 | Status "can't reach server" / "disconnected from server" | The `web` container is down. Check `docker compose ps` and `docker compose logs web` |
 | Code changes don't show up | Static files are baked into the image. Run `docker compose up -d --build` and hard-refresh (Ctrl+F5) |
-| coturn keeps restarting | A flag isn't supported by that coturn version. Run `docker compose logs coturn` and look for "unrecognized option" |
 
 Useful browser pages: `chrome://webrtc-internals` (Chrome) and `about:webrtc` (Firefox) show every candidate, the selected pair, and DataChannel byte counts.
 

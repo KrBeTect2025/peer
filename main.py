@@ -14,10 +14,7 @@ from fastapi.staticfiles import StaticFiles
 BASE = Path(__file__).parent
 load_dotenv(BASE / ".env")
 
-TURN_HOST = os.getenv("TURN_HOST", "127.0.0.1")
-TURN_USER = os.getenv("TURN_USER", "webrtc")
-TURN_PASS = os.getenv("TURN_PASS", "webrtc")
-# optional: Metered TURN credentials URL (with ?apiKey=...), for use over the internet
+# Metered TURN credentials URL (with ?apiKey=...): the relay for when the browsers can't connect directly
 METERED_TURN_URL = os.getenv("METERED_TURN_URL")
 metered_cache: tuple[float, list] = (0.0, [])  # (fetched at, iceServers)
 
@@ -64,27 +61,15 @@ def metered_ice_servers(url: str):
 
 @app.get("/config")
 def config():
-    # ICE servers handed to the browser, so the JS never hardcodes IPs or passwords
+    # ICE servers handed to the browser, so the API key stays on the server
     if METERED_TURN_URL:
-        # Metered returns a ready-made iceServers list with TURN credentials
+        # Metered returns a ready-made iceServers list with STUN + TURN credentials
         try:
             return {"iceServers": metered_ice_servers(METERED_TURN_URL)}
         except Exception as err:
-            print("Metered TURN failed, falling back to coturn:", err)
-    return {
-        "iceServers": [
-            {"urls": "stun:stun.l.google.com:19302"},
-            {"urls": f"stun:{TURN_HOST}:3478"},
-            {
-                "urls": [
-                    f"turn:{TURN_HOST}:3478?transport=udp",
-                    f"turn:{TURN_HOST}:3478?transport=tcp",
-                ],
-                "username": TURN_USER,
-                "credential": TURN_PASS,
-            },
-        ]
-    }
+            print("Metered TURN failed, falling back to STUN only:", err)
+    # STUN only: direct connections still work, browsers behind strict NAT won't connect
+    return {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
 
 
 @app.websocket("/ws/{room_id}")
