@@ -5,7 +5,6 @@ WebRTC DataChannel; the server only relays the handshake and never sees the file
 
 FastAPI signaling server + plain-JS client + Redis (which codes are active) + a Cloudflare tunnel (the public HTTPS link),
 all running in Docker. Metered's hosted STUN/TURN connects the browsers when they can't reach each other directly.
-See [EXPLANATION.md](EXPLANATION.md) for how every piece works.
 
 ## One-time setup
 
@@ -37,7 +36,7 @@ curl http://127.0.0.1:20241/quicktunnel   # prints the https://xxxx.trycloudflar
    "expired" (for an hour after); a mistyped one as "no such code".
 
 The receiver writes to disk as the file arrives, so memory stays flat and the only size limit is free disk space
-(Safari: the browser's storage quota for the site). Tested with files up to 50 GB; see [tests/REPORT.md](tests/REPORT.md).
+(Safari: the browser's storage quota for the site). Tested with files up to 50 GB.
 Codes expire after 1 hour: nobody new can join after that, but a transfer already running finishes.
 
 ### Without Docker (optional)
