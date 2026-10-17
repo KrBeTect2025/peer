@@ -10,5 +10,5 @@ def index():
 
 @app.get("/sw.js")
 def service_worker():
-    # served from the root, not /static/, so the worker's scope is the whole site (it answers /dl/... requests)
+    # served from root so the worker's scope covers /dl/
     return FileResponse(BASE / "static" / "sw.js", media_type="text/javascript")
