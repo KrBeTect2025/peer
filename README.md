@@ -53,6 +53,13 @@ sequenceDiagram
 
 For a full walkthrough of every component, see **[EXPLANATION.md](EXPLANATION.md)**.
 
+### Knowledge graph
+
+The codebase is mapped as a knowledge graph with [graphify](https://github.com/Graphify-Labs/graphify): 213 nodes, 374 edges and 12 communities (signaling, client WebRTC, service worker download, tests, and more).
+
+- **[GRAPH_REPORT.md](graphify-out/GRAPH_REPORT.md)**: core abstractions, communities and surprising connections.
+- **[graph.html](graphify-out/graph.html)**: interactive graph. Download it and open it in a browser, since GitHub shows HTML as source.
+
 ## Tech stack
 
 | Layer | Technology |
@@ -140,6 +147,7 @@ Open `http://localhost:8000`. Browsers allow WebRTC and service workers on `loca
 │   ├── sw.js               # service worker: stream → browser download
 │   └── zip.js              # streaming ZIP/ZIP64 writer for multi-file sends
 ├── tests/                  # Playwright browser tests, code-lifecycle and zip tests, REPORT.md
+├── graphify-out/           # knowledge graph: GRAPH_REPORT.md + interactive graph.html
 ├── Dockerfile
 └── docker-compose.yml
 ```
