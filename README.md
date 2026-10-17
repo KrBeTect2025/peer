@@ -1,8 +1,8 @@
 # P2P File Share
 
-**Send files of any size directly from one browser to another with a 6-digit code: no accounts, no uploads, no installs.**
+**Send files of any size from one device to another, across the internet, with a 6-digit code: no accounts, no uploads, no installs.**
 
-Files go browser to browser over an encrypted WebRTC DataChannel. The server only introduces the two browsers to each other and never sees the file. The receiver gets an ordinary download in the browser's download bar, written to disk as it arrives, so memory use stays flat whether the file is 1 MB or 50 GB.
+Open the page on two devices, on the same Wi-Fi or on opposite sides of the world, and the file streams from one browser to the other over an encrypted WebRTC connection. The server only introduces the two browsers to each other and never sees the file. The receiver gets an ordinary download in the browser's download bar, written to disk as it arrives, so memory use stays flat whether the file is 1 MB or 200 GB.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSockets-009688?logo=fastapi&logoColor=white)
@@ -14,13 +14,13 @@ Files go browser to browser over an encrypted WebRTC DataChannel. The server onl
 
 ## Features
 
-- **Truly peer-to-peer.** File data never touches the server. WebRTC encrypts it end to end (DTLS), even when it goes through a TURN relay.
-- **No size limit except free disk space.** Tested with files up to **50 GB**, with the receiver's memory staying flat at around 400–570 MB.
+- **Truly peer-to-peer, over any network.** Sender and receiver can be on different devices, networks and countries. File data never touches the server. WebRTC encrypts it end to end (DTLS), even when it goes through a TURN relay.
+- **No file size limit.** The app imposes no cap: 100 GB or 200 GB files work, limited only by the receiver's free disk space and a stable connection (see [Large files](#large-files-100-gb)). Verified with files up to **50 GB**, with the receiver's memory staying flat at around 400–570 MB.
 - **Native downloads.** A service worker turns the incoming stream into a normal browser download, with the browser's own progress bar, time remaining, and pause/resume.
 - **Multiple files.** Selecting several files sends them as one `.zip`, built on the fly while sending. Nothing is buffered, files over 4 GB use ZIP64, and the files are stored uncompressed, so the exact size is known up front.
 - **Backpressure all the way to disk.** The sender stays at most 64 MB ahead of what the receiver has actually saved, so a slow disk or a paused download never runs anyone out of memory.
 - **Works across networks.** STUN for direct connections and Metered TURN as a relay fallback for strict NATs. ICE restarts automatically when a phone switches between Wi-Fi and 4G.
-- **Short-lived codes.** A code is valid only while the sender's tab is open, for at most 1 hour. Expired codes are never reused, and users get distinct messages for an expired code and a mistyped one.
+- **Short-lived codes.** A code is valid only while the sender keeps the page open, for at most 1 hour. Expired codes are never reused, and users get distinct messages for an expired code and a mistyped one.
 - **Graceful fallbacks.** If the service worker can't stream (for example Safari), the receiver falls back to the native save dialog, then to the browser's private storage (OPFS).
 
 ## How it works
@@ -81,8 +81,8 @@ The codebase is mapped as a knowledge graph with [graphify](https://github.com/G
 ### Setup
 
 ```bash
-git clone https://github.com/KrBeTect2025/webrtc.git
-cd webrtc
+git clone https://github.com/KrBeTect2025/peer-peer.git
+cd peer-peer
 cp .env.example .env    # then set METERED_TURN_URL to your Metered credentials URL
 ```
 
@@ -123,9 +123,22 @@ Open `http://localhost:8000`. Browsers allow WebRTC and service workers on `loca
 
 ## Usage
 
-1. **Sender:** choose one or more files. A 6-digit code appears. Keep the tab open.
-2. **Receiver:** enter the code and press **Receive**. The download starts immediately in the browser's download bar.
-3. The same code can serve more receivers, one at a time, for up to an hour while the sender's tab stays open.
+1. **Sender (any device):** open the app, choose one or more files. A 6-digit code appears. Keep the page open until the transfer finishes.
+2. **Receiver (any other device, any network):** open the same app link, enter the code and press **Receive**. The download starts immediately in the browser's download bar.
+3. The same code can serve more receivers, one at a time, for up to an hour while the sender keeps the page open.
+
+## Large files (100 GB+)
+
+There is no size cap in the app: the file is streamed straight to the receiver's disk, never held in memory, and multi-file zips switch to ZIP64 past 4 GB. Practical limits for very large transfers:
+
+| Factor | What it means |
+|---|---|
+| **Receiver's free disk space** | The only hard limit (Chrome, Edge, Firefox). |
+| **Connection stability** | A transfer cannot resume after a long drop: it starts over. Short network blips are retried automatically. Keep both devices plugged in with sleep turned off. |
+| **Speed** | Set by the slower of the two connections. At 10 MB/s, 100 GB takes about 3 hours; at 3 MB/s, about 9. Both pages must stay open the whole time. |
+| **TURN relay quota** | Direct connections use no relay. If the networks force a relay, data counts against the Metered quota (20 GB/month on the free plan), so very large relayed transfers need a paid plan or your own TURN server. |
+| **Safari fallback** | Saves into the browser's site storage first, which the browser limits per site, so very large files need Chrome, Edge or Firefox on the receiving side. |
+| **1-hour code expiry** | Doesn't cut off a running transfer: after an hour no new receiver can join, but the current one finishes. |
 
 ## Project structure
 
@@ -177,7 +190,7 @@ python check_codes.py ws://127.0.0.1:8000
 
 ## Limitations
 
-- **No resume after a dropped connection.** A broken transfer starts over.
+- **No resume after a dropped connection.** A broken transfer starts over, which matters most for 100 GB+ files.
 - **Single server instance.** Live WebSocket rooms are held in memory, so the app runs as one Uvicorn worker. Scaling out would need a shared pub/sub layer, such as Redis channels.
 - **Not tested on Safari or mobile devices.** Safari's stream behaviour is simulated in tests.
 - **Throughput depends on the network path.** Relayed (TURN) transfers count against the Metered quota.
