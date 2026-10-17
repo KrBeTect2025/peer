@@ -170,7 +170,7 @@ Testing found five bugs, all fixed, including a race condition that only appeare
 
 ```bash
 cd tests && npm i
-node browser.test.mjs basic edge firefox zero unicode html second senderdrop cancel nosw dataclone
+node browser.test.mjs basic edge firefox zero unicode html second multi senderdrop cancel nosw dataclone
 node zip.test.mjs
 python check_codes.py ws://127.0.0.1:8000
 ```
