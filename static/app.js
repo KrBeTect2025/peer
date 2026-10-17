@@ -499,8 +499,10 @@ function leave() {
 }
 
 // ---------- buttons ----------
+// several files go as one .zip (see zip.js); the receiver just gets a file
 $("file").onchange = () => {
-    if ($("file").files[0]) share($("file").files[0]);
+    const files = [...$("file").files];
+    if (files.length) share(files.length === 1 ? files[0] : zipFiles(files));
 };
 
 // new file = new code; leave() drops the old code on the server immediately
