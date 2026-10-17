@@ -30,6 +30,7 @@ both on `localhost` and through the public Cloudflare link.
 | `unicode` | Name `तस्वीर (1) 'x' #&.jpg` | Saved with exactly that name |
 | `html` | Sender sends an `.html` file with a script | Saved as a file; page didn't navigate, open a tab or run it |
 | `second` | Two receives in the same tab | Both byte-identical |
+| `multi` | Three files picked at once (30 MB, a Hindi name, 0 bytes) | Saved as `3 files.zip`; Python's `zipfile` finds all three byte-identical, CRCs valid |
 | `senderdrop` | Sender closes the tab at ~20 MB | The browser asks first (beforeunload); the receiver's download is marked **failed**, not stuck; receiver says "transfer stopped" |
 | `cancel` | Receiver cancels in the download bar | Receiver says "download cancelled"; sender says "receiver left, waiting for receiver..." |
 | `nosw` | Browser without service workers | Falls back to the "save …" button / save dialog; file identical |
@@ -111,7 +112,7 @@ npm i                                   # playwright-core
 npx playwright-core install firefox     # once, for the Firefox tests (Chrome and Edge must be installed)
 
 python check_codes.py ws://127.0.0.1:8000                          # server: code states
-node browser.test.mjs basic edge firefox zero unicode html second senderdrop cancel nosw dataclone
+node browser.test.mjs basic edge firefox zero unicode html second multi senderdrop cancel nosw dataclone
 LONG_MB=1024 node browser.test.mjs long                            # long transfer + memory (Windows)
 node real-chrome.mjs                                               # plain Chrome, real downloads
 node public-link.mjs https://<your-link>.trycloudflare.com/        # visible windows, Downloads\p2p-test

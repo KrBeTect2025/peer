@@ -1,7 +1,7 @@
 // Browser tests: two real browsers (Chrome sender; Chrome, Edge or Firefox receiver) against a running app.
 //   npm i && npx playwright-core install firefox      (once; Chrome and Edge must be installed)
 //   node browser.test.mjs <test>...
-//   tests: basic edge zero unicode html second senderdrop cancel nosw dataclone firefox long
+//   tests: basic edge zero unicode html second multi senderdrop cancel nosw dataclone firefox long
 //   env:   APP_URL (default http://localhost:8000/), TEST_DIR (big files + downloads; default <tmp>/p2p-test),
 //          LONG_MB (size of the "long" test, default 3072), NOPING=1 (run "firefox" without the keep-alive ping)
 import { chromium, firefox } from "playwright-core";
@@ -146,6 +146,26 @@ async function special(name, content, label) {
     }
 }
 
+// several files picked at once arrive as one .zip (static/zip.js); Python's zipfile checks names, contents and CRCs
+async function multi() {
+    const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
+    try {
+        const sp = await page(send, { waitForSW: false }), rp = await page(recv);
+        const files = [makeFile("multi-big.bin", 30 * MB), makeFile("नाम (2).txt", 5000, randomBytes(5000)), makeFile("multi-empty.txt", 0, Buffer.alloc(0))];
+        const r = await transfer(sp, rp, { path: files.map((f) => f.path) });
+        check(r.d.suggestedFilename() === "3 files.zip", `saved as "${r.d.suggestedFilename()}"`);
+        const py = `import zipfile,sys,json,hashlib
+z=zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None
+print(json.dumps({i.filename:hashlib.sha1(z.read(i)).hexdigest() for i in z.infolist()}, ensure_ascii=False))`;
+        const got = JSON.parse(execFileSync("python", ["-c", py, r.path], { encoding: "utf8", env: { ...process.env, PYTHONIOENCODING: "utf8" } }));
+        check(files.every((f) => got[f.name] === f.sha1) && Object.keys(got).length === 3, `zip holds all 3 files byte-identical (${Object.keys(got).join(", ")})`);
+        check(await until(rp, /in your downloads/), `receiver says: ${await recvStatus(rp)}`);
+        files.forEach((f) => rmSync(f.path)); rmSync(r.path, { force: true });
+    } finally {
+        await Promise.allSettled([send.close(), recv.close()]);
+    }
+}
+
 async function second() {
     const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
     try {
@@ -270,6 +290,7 @@ const tests = {
     unicode: () => special("तस्वीर (1) 'x' #&.jpg", randomBytes(5000), "Hindi/quotes/brackets name"),
     html: () => special("evil.html", Buffer.from("<script>document.title='pwned';parent.document.title='pwned'</script><h1>hi</h1>"), ".html from the sender"),
     second,
+    multi,
     senderdrop: () => midway("senderdrop"),
     cancel: () => midway("cancel"),
     nosw: () => fallback("nosw"),
