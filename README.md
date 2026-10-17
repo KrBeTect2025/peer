@@ -81,8 +81,8 @@ The codebase is mapped as a knowledge graph with [graphify](https://github.com/G
 ### Setup
 
 ```bash
-git clone https://github.com/KrBeTect2025/peer-peer.git
-cd peer-peer
+git clone https://github.com/KrBeTect2025/peer.git
+cd peer
 cp .env.example .env    # then set METERED_TURN_URL to your Metered credentials URL
 ```
 
