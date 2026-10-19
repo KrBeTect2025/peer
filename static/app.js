@@ -450,6 +450,18 @@ $("file").onchange = () => {
     if (files.length) share(files.length === 1 ? files[0] : zipFiles(files));
 };
 
+$("pickFolder").onclick = () => $("folder").click();
+$("folder").onchange = () => {
+    const files = [...$("folder").files];
+    $("folder").value = "";
+    if (!files.length) {
+        $("sendStatus").textContent = "that folder has no files";
+        return;
+    }
+    $("file").value = "";
+    share(zipFiles(files, files[0].webkitRelativePath.split("/")[0] + ".zip"));
+};
+
 function share(f) {
     leave();
     statusEl = $("sendStatus");

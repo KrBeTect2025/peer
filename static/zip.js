@@ -34,7 +34,7 @@ function dosTime(ms) {
         | (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) >>> 0;
 }
 
-function zipFiles(files) {
+function zipFiles(files, name) {
     const enc = new TextEncoder();
     const parts = [];
     const entries = [];
@@ -45,7 +45,7 @@ function zipFiles(files) {
     };
 
     for (const f of files) {
-        const e = { name: enc.encode(f.name), size: f.size, offset, crc: 0, time: dosTime(f.lastModified) };
+        const e = { name: enc.encode(f.webkitRelativePath || f.name), size: f.size, offset, crc: 0, time: dosTime(f.lastModified) };
         e.zip64 = f.size >= MAX32 || offset >= MAX32;
         entries.push(e);
         const header = pack([0x04034b50, 4], [45, 2], [FLAGS, 2], [0, 2], [e.time, 4], [0, 4], [0, 4], [0, 4],
@@ -94,7 +94,7 @@ function zipFiles(files) {
         return out.buffer;
     };
     return {
-        name: `${count} files.zip`,
+        name: name || `${count} files.zip`,
         size: offset,
         type: "application/zip",
         slice: (start, end) => ({ arrayBuffer: () => read(start, Math.min(end, offset)) }),

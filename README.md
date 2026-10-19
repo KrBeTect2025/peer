@@ -17,7 +17,7 @@ Open the page on two devices, on the same Wi-Fi or on opposite sides of the worl
 - **Truly peer-to-peer, over any network.** Sender and receiver can be on different devices, networks and countries. File data never touches the server. WebRTC encrypts it end to end (DTLS), even when it goes through a TURN relay.
 - **No file size limit.** The app imposes no cap: 100 GB or 200 GB files work, limited only by the receiver's free disk space and a stable connection (see [Large files](#large-files-100-gb)). Verified with files up to **50 GB**, with the receiver's memory staying flat at around 400–570 MB.
 - **Native downloads.** A service worker turns the incoming stream into a normal browser download, with the browser's own progress bar, time remaining, and pause/resume.
-- **Multiple files.** Selecting several files sends them as one `.zip`, built on the fly while sending. Nothing is buffered, files over 4 GB use ZIP64, and the files are stored uncompressed, so the exact size is known up front.
+- **Multiple files and folders.** Selecting several files, or a whole folder with **Choose folder**, sends them as one `.zip` (a folder keeps its name and subfolders), built on the fly while sending. Nothing is buffered, files over 4 GB use ZIP64, and the files are stored uncompressed, so the exact size is known up front.
 - **Backpressure all the way to disk.** The sender stays at most 64 MB ahead of what the receiver has actually saved, so a slow disk or a paused download never runs anyone out of memory.
 - **Works across networks.** STUN for direct connections and Metered TURN as a relay fallback for strict NATs. ICE restarts automatically when a phone switches between Wi-Fi and 4G.
 - **Short-lived codes.** A code is valid only while the sender keeps the page open, for at most 1 hour. Expired codes are never reused, and users get distinct messages for an expired code and a mistyped one.
@@ -169,7 +169,7 @@ The app was tested end to end in real Chrome, Edge and Firefox, both locally and
 | 0-byte files, Unicode names, `.html` files (never rendered) | ✅ |
 | Sender closes tab mid-transfer / receiver cancels | ✅ Clear message on both sides, no stuck downloads |
 | No service worker / Safari-style stream failure | ✅ Falls back to the save dialog |
-| Multi-file zip (4 and 300 files), verified by Python's `zipfile` | ✅ |
+| Multi-file and folder zip (4 and 300 files, nested paths), verified by Python's `zipfile` | ✅ |
 
 Testing found five bugs, all fixed, including a race condition that only appeared over the public internet. See **[tests/REPORT.md](tests/REPORT.md)** for the full report, methodology and known gaps.
 

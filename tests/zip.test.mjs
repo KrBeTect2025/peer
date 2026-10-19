@@ -38,6 +38,19 @@ for (const f of files) expect[f.name] = [f.size, await sha1(f)];
 await check(files, expect);
 await check(Array.from({ length: 300 }, (_, i) => new File([String(i)], `f${i}.txt`)),
     Object.fromEntries(await Promise.all(Array.from({ length: 300 }, async (_, i) => [`f${i}.txt`, [String(i).length, await sha1(new File([String(i)], ""))]]))));
+{
+    // a picked folder: entries keep their paths (webkitRelativePath), same file name in two subfolders
+    const inFolder = (path, f) => Object.defineProperty(f, "webkitRelativePath", { value: path });
+    const folder = [
+        inFolder("trip/a.txt", new File(["a"], "a.txt")),
+        inFolder("trip/day 1/photo.jpg", files[0]),
+        inFolder("trip/day 2/photo.jpg", new File([randomBytes(1000)], "photo.jpg")),
+    ];
+    const want = {};
+    for (const f of folder) want[f.webkitRelativePath] = [f.size, await sha1(f)];
+    await check(folder, want);
+    if (zipFiles(folder, "trip.zip").name !== "trip.zip") throw new Error("zip name not used");
+}
 
 if (process.env.ZIP64) {
     // a file past 4 GB (zeros, never held in memory), then a small one whose offset is past 4 GB
