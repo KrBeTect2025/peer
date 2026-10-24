@@ -25,6 +25,7 @@ const mb = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : (n / 
 const progress = (done, total) => {
     $("bar").hidden = false;
     $("bar").value = total ? done / total : 1;
+    ui.progress(done, total);
 };
 let painted = 0;
 const paintDue = () => {
@@ -34,7 +35,9 @@ const paintDue = () => {
     return true;
 };
 const loadConfig = () => fetch("/config").then((r) => r.json()).then((c) => c.iceServers);
+const watchOnline = (p) => p.then(() => ui.online(true), () => ui.online(false));
 let configReady = loadConfig();
+watchOnline(configReady);
 navigator.serviceWorker?.register("/sw.js").catch(() => { });
 addEventListener("beforeunload", (e) => {
     if (pc) e.preventDefault();
@@ -97,6 +100,7 @@ async function findRoute(conn) {
     if (!local || !remote) return;
     route = local.candidateType === "relay" || remote.candidateType === "relay" ? "relay"
         : local.candidateType === "host" && remote.candidateType === "host" ? "direct, same network" : "direct";
+    ui.route(route);
 }
 
 function setupChannel(ch) {
@@ -224,6 +228,7 @@ function receiveInto(ch) {
     ch.onmessage = (e) => {
         if (typeof e.data === "string") {
             meta = JSON.parse(e.data);
+            ui.incoming(meta);
             openSink(meta).then((s) => {
                 if (failed || ch.readyState !== "open") return s.abort();
                 sink = s;
@@ -405,6 +410,7 @@ async function join(code) {
         iceServers = await configReady;
     } catch (err) {
         configReady = loadConfig();
+        watchOnline(configReady);
         status("can't reach server");
         return;
     }
@@ -447,7 +453,7 @@ function leave() {
 
 $("file").onchange = () => {
     const files = [...$("file").files];
-    if (files.length) share(files.length === 1 ? files[0] : zipFiles(files));
+    if (files.length) share(files.length === 1 ? files[0] : zipFiles(files), files.length);
 };
 
 $("pickFolder").onclick = () => $("folder").click();
@@ -459,11 +465,12 @@ $("folder").onchange = () => {
         return;
     }
     $("file").value = "";
-    share(zipFiles(files, files[0].webkitRelativePath.split("/")[0] + ".zip"));
+    share(zipFiles(files, files[0].webkitRelativePath.split("/")[0] + ".zip"), files.length);
 };
 
-function share(f) {
+function share(f, count = 1) {
     leave();
+    ui.file(f, count);
     statusEl = $("sendStatus");
     $("recvStatus").textContent = "";
     $("bar").hidden = true;
