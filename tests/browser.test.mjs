@@ -166,6 +166,29 @@ print(json.dumps({i.filename:hashlib.sha1(z.read(i)).hexdigest() for i in z.info
     }
 }
 
+// "pick the file again" must work with the very same file: the browser fires no change event for an
+// unchanged selection unless the input was cleared
+async function samefile() {
+    const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
+    try {
+        const sp = await page(send, { waitForSW: false }), rp = await page(recv);
+        const f = makeFile("same.bin", 5 * MB);
+        const first = await share(sp, f);
+        await sp.setInputFiles("#file", f.path);
+        const again = await sp.waitForFunction((old) => /^\d{6}$/.test(document.querySelector("#code").textContent)
+            && document.querySelector("#code").textContent !== old, first, { timeout: 15000 }).then(() => sp.textContent("#code"), () => null);
+        check(again && again !== first, `picking the same file again gives a new code (${first} -> ${again})`);
+        if (again) {
+            const r = await transfer(sp, rp, f, { timeout: 60000 }).catch(() => null);
+            check(r && (await sha1(r.path)) === f.sha1, "and that new code delivers the file byte-identical");
+            if (r) rmSync(r.path, { force: true });
+        }
+        rmSync(f.path);
+    } finally {
+        await Promise.allSettled([send.close(), recv.close()]);
+    }
+}
+
 async function second() {
     const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
     try {
@@ -290,6 +313,7 @@ const tests = {
     unicode: () => special("तस्वीर (1) 'x' #&.jpg", randomBytes(5000), "Hindi/quotes/brackets name"),
     html: () => special("evil.html", Buffer.from("<script>document.title='pwned';parent.document.title='pwned'</script><h1>hi</h1>"), ".html from the sender"),
     second,
+    samefile,
     multi,
     senderdrop: () => midway("senderdrop"),
     cancel: () => midway("cancel"),

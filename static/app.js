@@ -71,6 +71,13 @@ function createPeer() {
 
 // only the offerer restarts ICE, so the two sides never send offers at each other
 function retry(conn) {
+    // an ICE restart needs signaling; with the server gone there is nothing to retry through
+    if (!ws) {
+        closePeer();
+        if (file) $("code").textContent = "";
+        status(`connection failed while the server was restarting, ${file ? "pick the file again" : "ask for a new code"}`);
+        return;
+    }
     if (retries >= MAX_RETRIES) {
         status("connection failed (different networks need a reachable TURN server)");
         return;
@@ -132,8 +139,14 @@ async function sendFile(ch) {
             ackedAt = performance.now();
         }
         else if (e.data === "done") {
+            ui.finish();
             closePeer();
-            status(`sent ✓  code still active, keep this tab open to send again`);
+            if (ws) status(`sent ✓  code still active, keep this tab open to send again`);
+            else {
+                // the server went away during the transfer, so the code died with it
+                $("code").textContent = "";
+                status("sent ✓  the server restarted meanwhile, pick the file again to send it again");
+            }
         }
         wake();
     };
@@ -144,6 +157,7 @@ async function sendFile(ch) {
         if (ch.readyState !== "open") return;
         await nap();
     }
+    ui.begin();
     for (let off = 0; off < file.size; off += chunk) {
         while (ch.bufferedAmount > HIGH_WATER || off - acked > WINDOW) {
             if (ch.readyState !== "open") return;
@@ -221,6 +235,7 @@ function receiveInto(ch) {
             progress(1, 1);
             status("finishing...");
             await sink.close();
+            ui.finish();
             ch.send("done");
         }).catch(saveFailed);
     };
@@ -233,6 +248,7 @@ function receiveInto(ch) {
                 if (failed || ch.readyState !== "open") return s.abort();
                 sink = s;
                 t0 = performance.now();
+                ui.begin();
                 watch = setInterval(paint, 1000);
                 ch.send("go");
                 if (meta.size === 0) finish();
@@ -404,13 +420,22 @@ async function handle(msg) {
 
 const EXPIRED = "code expired: the sender closed the tab, picked another file, or its 1 hour ran out";
 
+// the stored request may have failed long ago (server was down at page load): ask again before giving up
+async function iceConfig() {
+    try {
+        return await configReady;
+    } catch {
+        configReady = loadConfig();
+        watchOnline(configReady);
+        return configReady;
+    }
+}
+
 async function join(code) {
     const id = joinId;
     try {
-        iceServers = await configReady;
+        iceServers = await iceConfig();
     } catch (err) {
-        configReady = loadConfig();
-        watchOnline(configReady);
         status("can't reach server");
         return;
     }
@@ -427,6 +452,9 @@ async function join(code) {
     socket.onclose = (e) => {
         if (socket !== ws) return;
         ws = null;
+        // the file goes peer to peer: an unplanned drop (server restart, deploy) mustn't stop a running transfer.
+        // Codes 4000+ and 1008 are the server's own decisions and still end everything.
+        if (pc?.connectionState === "connected" && e.code < 4000 && e.code !== 1008) return;
         closePeer();
         if (e.code === 4409) share(file);
         else if (e.code === 4404) status("no such code, check the digits");
@@ -453,6 +481,8 @@ function leave() {
 
 $("file").onchange = () => {
     const files = [...$("file").files];
+    // otherwise picking the same file again (e.g. after "pick the file again") fires no change event
+    $("file").value = "";
     if (files.length) share(files.length === 1 ? files[0] : zipFiles(files), files.length);
 };
 

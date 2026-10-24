@@ -87,6 +87,7 @@
     let last = null;
     let speed = 0;
     let size0 = 0;
+    let started = 0;
     const progress = (done, total) => {
         const now = performance.now();
         if (last && total === last.total && done > last.done) {
@@ -98,9 +99,24 @@
         document.querySelector(".fill").style.setProperty("--p", p);
         $("pct").textContent = `${Math.floor(p * 100)}%`;
         if (total > 1) size0 = total;
-        if (total <= 1) return ($("readout").innerHTML = size0 ? `${size(size0)}${speed ? ` · avg <b>${size(speed)}/s</b>` : ""}` : "");
+        if (total <= 1) return ($("readout").textContent = size0 ? size(size0) : "");
         const left = speed ? clock((total - done) / speed) + " left" : "";
         $("readout").innerHTML = `${size(done)} / ${size(total)}${speed ? ` · <b>${size(speed)}/s</b>` : ""}${left ? " · " + left : ""}`;
+    };
+
+    // app.js calls begin() when bytes start to flow (receiver saving / sender got "go") and finish() once the
+    // receiver has the whole file, so the average covers exactly one transfer, even on a reused code
+    const begin = () => {
+        last = null;
+        speed = 0;
+        size0 = 0;
+        started = performance.now();
+    };
+    const finish = () => {
+        if (!started) return;
+        const secs = (performance.now() - started) / 1000;
+        started = 0;
+        if (size0) $("readout").innerHTML = `${size(size0)} in ${clock(secs)} · avg <b>${size(size0 / secs)}/s</b>`;
     };
 
     // the code: six cells in two groups, text stays exactly the digits
@@ -189,6 +205,7 @@
             last = null;
             speed = 0;
             size0 = 0;
+            started = 0;
             route("");
         }
     }).observe($("bar"), { attributes: true, attributeFilter: ["hidden"] });
@@ -222,6 +239,6 @@
         $("online").firstChild.classList.toggle("pulse", ok);
     };
 
-    window.ui = { file, incoming, route, progress, online };
+    window.ui = { file, incoming, route, progress, online, begin, finish };
     renderCode();
 }
