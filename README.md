@@ -169,9 +169,9 @@ The app was tested end to end in real Chrome, Edge and Firefox, both locally and
 | 0-byte files, Unicode names, `.html` files (never rendered) | ✅ |
 | Sender closes tab mid-transfer / receiver cancels | ✅ Clear message on both sides, no stuck downloads |
 | No service worker / Safari-style stream failure | ✅ Falls back to the save dialog |
-| Multi-file and folder zip (4 and 300 files, nested paths), verified by Python's `zipfile` | ✅ |
+| Multi-file and folder zip (4, 300 and 65,536 files, nested paths, two receivers at once, out-of-order reads), verified by Python's `zipfile` | ✅ |
 
-Testing found five bugs, all fixed, including a race condition that only appeared over the public internet. See **[tests/REPORT.md](tests/REPORT.md)** for the full report, methodology and known gaps.
+Testing and code review found seven bugs, all fixed, including a race condition that only appeared over the public internet. See **[tests/REPORT.md](tests/REPORT.md)** for the full report, methodology and known gaps.
 
 ```bash
 cd tests && npm i

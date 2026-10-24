@@ -78,6 +78,8 @@ test harness, so it isn't in `browser.test.mjs`.
 | 3 | `cancel` test | Cancelling in the download bar showed "couldn't save the file: Cannot read properties of undefined" | The browser rejects with no error at all; that now reads "download cancelled" |
 | 4 | Ping experiment, then a real pause | Without progress the receiver just said "receiving…" forever. A first fix (end the transfer after 60 s without progress) turned out to also kill downloads **paused** for over a minute | Never end a transfer on a timer. After 5 s without progress both sides say so ("is the download paused?" / "receiver's download is paused or busy"), and both pages now count *saved* bytes, so they match the download bar |
 | 5 | Earlier, 1-hour test | A code expiring after 1 hour also killed a transfer still running | After the hour no one new can join, but the running transfer finishes |
+| 6 | `zip.test.mjs`, a folder of 70,000 files | Building the zip's central directory failed with "Maximum call stack size exceeded": every entry was spread into one `pack()` call | Entries are packed one at a time into a single buffer; the test now zips 65,536 files, the smallest count that also needs ZIP64 |
+| 7 | Code review, then a new `zip.test.mjs` case | Two receivers reading the same zip at once (or reads out of order) got a corrupt zip: reads shared one position cursor, and CRCs were folded in on every read | No shared cursor (parts are found by binary search); a CRC only advances on the next contiguous bytes and gaps are read on demand. Tested with interleaved and back-to-front reads |
 
 ## 3. Earlier results: why the receiver writes to disk at all
 
