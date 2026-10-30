@@ -2,3 +2,10 @@ __pycache__/
 certs/
 .env
 *.md
+.git/
+.venv/
+.vscode/
+.superdesign/
+brag-output/
+graphify-out/
+tests/

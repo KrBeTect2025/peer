@@ -9,7 +9,7 @@ Open problems found by the production-event test run (see [tests/PROD-TEST-REPOR
 | F6 | Low | After a failed transfer the progress strip stays frozen (e.g. "16% · 0:11 left", Transfer step lit). | Looks like the transfer is still running; the error line below it is correct. | — | `static/ui.js`: mark the strip stopped or hide it when the status turns to an error |
 | F7 | Low | One failure can show two error notifications (e.g. "Code expired" + "Transfer stopped"), overlapping while they animate in. | Noisy. | — | `static/ui.js`: merge errors arriving within ~1 s |
 | F8 | Low | Typing your own code into Receive in the sender tab cancels your share and says "code expired: the sender closed the tab…". | Confusing message; the share has to be started again. | Enter the code on the other device | Detect the tab's own code and explain instead of cancelling |
-| F9 | Low | With Redis down, the sender sees "getting a code…" for a few seconds (2–15 s) before "server error". | Slow error. | — | Shorter Redis connect timeout in `db/client.py` |
+| F9 | Low | With Redis down, the sender sees "getting a code…" for a few seconds before "server error". Now capped at about 5 s by the Redis timeouts in `db/client.py`. | Slow error. | — | Lower the timeouts further if it still feels slow |
 | F10 | Cosmetic | At phone width the step list wraps "DONE" onto a second line. | Cosmetic. | — | Shorter labels or a smaller gap under 400 px |
 
 ## Not yet tested
@@ -23,6 +23,7 @@ Open problems found by the production-event test run (see [tests/PROD-TEST-REPOR
 
 ## Deployment notes
 
+- Production runs on Koyeb with Upstash Redis: see [DEPLOY.md](DEPLOY.md). Keep the Koyeb service at exactly one instance.
 - The server must run as **one worker**: rooms live in memory (`services/rooms.py`). Only the code states are in Redis.
 - A restart or deploy no longer stops transfers already in progress (F1), but every waiting code dies with the old process. Senders see "disconnected from server" and pick the file again.
 - Without `METERED_TURN_URL`, only direct connections work. Users on strict networks will see "connection failed (different networks need a reachable TURN server)".
