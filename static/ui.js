@@ -96,7 +96,9 @@
         }
         if (!last || done !== last.done || total !== last.total) last = { done, total, t: now };
         const p = total ? done / total : 1;
-        document.querySelector(".fill").style.setProperty("--p", p);
+        const fill = document.querySelector(".fill");
+        fill.style.setProperty("--p", p);
+        fill.classList.toggle("full", p >= 1);
         $("pct").textContent = `${Math.floor(p * 100)}%`;
         if (total > 1) size0 = total;
         if (total <= 1) return ($("readout").textContent = size0 ? size(size0) : "");
