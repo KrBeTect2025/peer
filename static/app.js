@@ -473,23 +473,30 @@ async function join(code) {
     chain = Promise.resolve();
     socket.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        chain = chain.then(() => socket === ws && handle(msg)).catch(console.error);
+        // the server's reason for closing also comes as a message: some proxies (Render's) drop the close frame
+        chain = chain.then(() => {
+            if (msg.type !== "closed") return socket === ws && handle(msg);
+            ended(socket, msg.code);
+            socket.close();
+        }).catch(console.error);
     };
-    socket.onclose = (e) => {
-        if (socket !== ws) return;
-        ws = null;
-        // the file goes peer to peer: an unplanned drop (server restart, deploy) mustn't stop a running transfer.
-        // Codes 4000+ and 1008 are the server's own decisions and still end everything.
-        if (pc?.connectionState === "connected" && e.code < 4000 && e.code !== 1008) return;
-        closePeer();
-        if (e.code === 4409) share(file);
-        else if (e.code === 4404) status("no such code, check the digits");
-        else if (e.code === 4410) status(file ? "code expired (codes last 1 hour), pick the file again for a new code" : EXPIRED);
-        else if (e.code === 1008) status("code busy, someone is receiving it, try again in a moment");
-        else if (e.code === 1011) status("server error, try again in a moment");
-        else status("disconnected from server");
-        if (file && e.code !== 4409) $("code").textContent = "";
-    };
+    socket.onclose = (e) => ended(socket, e.code);
+}
+
+function ended(socket, code) {
+    if (socket !== ws) return;
+    ws = null;
+    // the file goes peer to peer: an unplanned drop (server restart, deploy) mustn't stop a running transfer.
+    // Codes 4000+ and 1008 are the server's own decisions and still end everything.
+    if (pc?.connectionState === "connected" && code < 4000 && code !== 1008) return;
+    closePeer();
+    if (code === 4409) share(file);
+    else if (code === 4404) status("no such code, check the digits");
+    else if (code === 4410) status(file ? "code expired (codes last 1 hour), pick the file again for a new code" : EXPIRED);
+    else if (code === 1008) status("code busy, someone is receiving it, try again in a moment");
+    else if (code === 1011) status("server error, try again in a moment");
+    else status("disconnected from server");
+    if (file && code !== 4409) $("code").textContent = "";
 }
 
 function closePeer() {

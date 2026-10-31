@@ -11,6 +11,7 @@ Open problems found by the production-event test run (see [tests/PROD-TEST-REPOR
 | F8 | Low | Typing your own code into Receive in the sender tab cancels your share and says "code expired: the sender closed the tab…". | Confusing message; the share has to be started again. | Enter the code on the other device | Detect the tab's own code and explain instead of cancelling |
 | F9 | Low | With Redis down, the sender sees "getting a code…" for a few seconds before "server error". Now capped at about 5 s by the Redis timeouts in `db/client.py`. | Slow error. | — | Lower the timeouts further if it still feels slow |
 | F10 | Cosmetic | At phone width the step list wraps "DONE" onto a second line. | Cosmetic. | — | Shorter labels or a smaller gap under 400 px |
+| F11 | Medium | A waiting code dies whenever the sender's server connection drops. On Render this happens without any deploy: Render replaces instances for maintenance and drops connections on network issues (seen on the live site 8 minutes into an idle wait, 2026-10-31). Running transfers are not affected. | The sender sees "disconnected from server" while waiting and has to pick the file again; a receiver who already has the code gets "code expired". | Pick the file again | The sender reconnects with backoff and reclaims its code with a secret token from `created`; the server keeps the code for a short grace period after a drop instead of expiring it at once |
 
 ## Not yet tested
 

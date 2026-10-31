@@ -5,7 +5,7 @@ import redis.asyncio as redis
 from core.server import app
 from db.client import CODE_TTL, db
 from fastapi import WebSocket, WebSocketDisconnect
-from services.rooms import KEEPALIVE, rooms, send_safe
+from services.rooms import KEEPALIVE, end, rooms, send_safe
 
 
 @app.websocket("/ws/{room_id}")
@@ -17,26 +17,25 @@ async def signaling(websocket: WebSocket, room_id: str, role: str = ""):
         if role == "send":
             # NX + 60s: a recently used code is never handed out again
             if not await db.set(key, "active", ex=CODE_TTL + 60, nx=True):
-                await websocket.close(code=4409)
+                await end(websocket, 4409)
                 return
             peers = rooms[room_id] = []
         else:
             state = await db.get(key)
             if state is None:
-                await websocket.close(code=4404)
+                await end(websocket, 4404)
                 return
             if state != "active" or room_id not in rooms:
-                await websocket.close(code=4410)
+                await end(websocket, 4410)
                 return
             peers = rooms[room_id]
     except redis.RedisError as err:
         print("redis error:", err)
-        await websocket.close(code=1011)
+        await end(websocket, 1011)
         return
 
     if len(peers) >= 2:
-        await websocket.send_text(json.dumps({"type": "full"}))
-        await websocket.close(code=1008)
+        await end(websocket, 1008)
         return
 
     peers.append(websocket)
@@ -68,10 +67,7 @@ async def signaling(websocket: WebSocket, room_id: str, role: str = ""):
                     await relay()
             except TimeoutError:
                 pass
-        try:
-            await websocket.close(code=4410)
-        except Exception:
-            pass
+        await end(websocket, 4410)
 
     reason = "left"
     try:

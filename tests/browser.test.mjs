@@ -1,7 +1,7 @@
 // Browser tests: two real browsers (Chrome sender; Chrome, Edge or Firefox receiver) against a running app.
 //   npm i && npx playwright-core install firefox      (once; Chrome and Edge must be installed)
 //   node browser.test.mjs <test>...
-//   tests: basic edge zero unicode html second multi senderdrop cancel recvsocket sendsocket nosw dataclone firefox long
+//   tests: basic edge zero unicode html second multi senderdrop cancel recvsocket sendsocket lostclose nosw dataclone firefox long
 //   env:   APP_URL (default http://localhost:8000/), TEST_DIR (big files + downloads; default <tmp>/p2p-test),
 //          LONG_MB (size of the "long" test, default 3072), NOPING=1 (run "firefox" without the keep-alive ping)
 import { chromium, firefox } from "playwright-core";
@@ -272,6 +272,31 @@ async function socketdrop(side) {
     }
 }
 
+// some proxies (Render's) drop the server's close frame, so its reason (no such code, expired) never arrived and
+// the page hung, then said "disconnected from server": the reason must also come through as a message
+async function lostclose() {
+    const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
+    try {
+        for (const ctx of [send, recv]) {
+            await ctx.routeWebSocket(/\/ws\//, (ws) => ws.connectToServer().onClose(() => { })); // swallow server closes
+        }
+        const sp = await page(send, { waitForSW: false }), rp = await page(recv);
+        await rp.fill("#codeIn", String(Math.floor(Math.random() * 1e6)).padStart(6, "0"));
+        await rp.click("#receive");
+        check(await until(rp, /no such code/, 5000), `unknown code, close frame lost: receiver says within 5 s: ${await recvStatus(rp)}`);
+        const f = makeFile("lostclose.txt", 5000, randomBytes(5000));
+        const code = await share(sp, f);
+        await sp.close();
+        await new Promise((r) => setTimeout(r, 1500));
+        await rp.fill("#codeIn", code);
+        await rp.click("#receive");
+        check(await until(rp, /code expired/, 5000), `sender gone, close frame lost: receiver says within 5 s: ${await recvStatus(rp)}`);
+        rmSync(f.path);
+    } finally {
+        await Promise.allSettled([send.close(), recv.close()]);
+    }
+}
+
 // fallbacks: browser without a service worker, and one that can't hand a stream to it (Safari's DataCloneError)
 async function fallback(kind) {
     const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
@@ -353,6 +378,7 @@ const tests = {
     cancel: () => midway("cancel"),
     recvsocket: () => socketdrop("recv"),
     sendsocket: () => socketdrop("send"),
+    lostclose,
     nosw: () => fallback("nosw"),
     dataclone: () => fallback("dataclone"),
     long: () => long(Number(process.env.LONG_MB || 3072)),

@@ -20,11 +20,22 @@ def url(code, send=False):
 
 
 async def close_code(ws):
+    # the server sends {"type": "closed", "code": ...} before closing, because some proxies (Render's)
+    # drop the close frame; where the frame does arrive, it must carry the same code
+    sent = None
     try:
-        await asyncio.wait_for(ws.recv(), 10)  # the server re-checks expired codes every 5 s
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), 10))  # the server re-checks expired codes every 5 s
+            assert msg.get("type") == "closed" and sent is None, f"expected the server to close the socket, got {msg}"
+            sent = msg["code"]
     except websockets.ConnectionClosed as e:
-        return e.rcvd.code if e.rcvd else None
-    raise AssertionError("expected the server to close the socket")
+        if e.rcvd and sent is not None:
+            assert e.rcvd.code == sent, f"close frame {e.rcvd.code} differs from the announced {sent}"
+        return sent if sent is not None else e.rcvd.code if e.rcvd else None
+    except TimeoutError:
+        if sent is not None:
+            return sent  # announced, but the proxy swallowed the close frame
+        raise
 
 
 async def main():
