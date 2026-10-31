@@ -217,6 +217,12 @@
     $("change").onclick = () => $("file").click();
     $("copy").onclick = () => navigator.clipboard?.writeText(codeEl.textContent)
         .then(() => toast("success", "Code copied", `${codeEl.textContent} is on your clipboard.`)).catch(() => { });
+    // copying the code by hand: each digit is its own box, so the browser would put one digit per line
+    document.addEventListener("copy", (e) => {
+        if (!codeEl.textContent || getSelection().toString().replace(/\s/g, "") !== codeEl.textContent) return;
+        e.clipboardData.setData("text/plain", codeEl.textContent);
+        e.preventDefault();
+    });
 
     const drop = $("drop");
     drop.ondragover = (e) => {

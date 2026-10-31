@@ -110,6 +110,9 @@
         #code > .cellgroup { display: flex; transition: box-shadow .2s; }
         #code.live > .cellgroup { box-shadow: var(--glow); }
         #code.wait .cellgroup > span { animation: shimmer 1.6s ease-in-out infinite; }
+        /* selected by hand: always the whole code, shown as red digits (the page's red block doesn't fit the cells) */
+        #code { user-select: all; }
+        #code ::selection { background: transparent; color: var(--red-text); }
         @keyframes shimmer { 50% { background: var(--surface); } }
         .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; }
         .expiry { display: flex; flex-direction: column; font-size: 14px; }
@@ -186,12 +189,14 @@
         .spec .cell + .cell { border-left: 1px solid rgba(255, 255, 255, .25); }
         .spec .eyebrow { color: rgba(255, 255, 255, .8); margin-bottom: 16px; }
         .spec .big { font-family: var(--mono); font-size: clamp(32px, 4.5vw, 56px); font-weight: 700; line-height: 1; white-space: nowrap; }
+        .spec .inf { width: 1.32em; height: .66em; fill: none; stroke: currentColor; stroke-width: 4.5; }
 
         @media (max-width: 1023px) {
             .spec .wrap { grid-template-columns: 1fr 1fr; row-gap: 0; }
             .spec .cell { padding: 0 0 0 32px; }
             .spec .cell:nth-child(odd) { padding-left: 0; border-left: 0; }
-            .spec .cell:nth-child(n+3) { margin-top: 32px; padding-top: 32px; border-top: 1px solid rgba(255, 255, 255, .25); }
+            .spec .cell:nth-child(-n+2) { padding-bottom: 32px; }
+            .spec .cell:nth-child(n+3) { padding-top: 32px; border-top: 1px solid rgba(255, 255, 255, .25); }
         }
         .spec p:not(.eyebrow) { margin: 8px 0 0; font-weight: 500; }
         footer { border-top: 1px solid var(--hairline); padding: 48px 0; }
@@ -353,7 +358,7 @@
     <section class="spec">
         <div class="wrap">
             <div class="cell"><p class="eyebrow">Storage</p><div class="big">0 B</div><p>on our server</p></div>
-            <div class="cell"><p class="eyebrow">Limits</p><div class="big">∞</div><p>file size limit</p></div>
+            <div class="cell"><p class="eyebrow">Limits</p><div class="big"><svg class="inf" viewBox="0 0 44 22" aria-hidden="true"><path d="M22 11C19 7 16 2.5 11 2.5a8.5 8.5 0 0 0 0 17c5 0 8-4.5 11-8.5s6-8.5 11-8.5a8.5 8.5 0 0 1 0 17c-5 0-8-4.5-11-8.5z"/></svg><span class="sr-only">No</span></div><p>file size limit</p></div>
             <div class="cell"><p class="eyebrow">Security</p><div class="big">DTLS</div><p>end-to-end encrypted</p></div>
             <div class="cell"><p class="eyebrow">Expiry</p><div class="big">60</div><p>min code lifetime</p></div>
         </div>
