@@ -10,6 +10,7 @@ let joinId = 0;
 let myCode = "";
 let offerer = false;
 let retries = 0;
+let heldBye = null; // the server's "bye" for the other side, held back while the peer connection still works
 const MAX_RETRIES = 4;
 const RETRY_DELAY = 8000;
 
@@ -51,6 +52,7 @@ function createPeer() {
     if (pc) pc.close();
     offerer = false;
     retries = 0;
+    heldBye = null;
     const conn = new RTCPeerConnection({
         iceServers,
         // ?relay=1 forces TURN, for testing
@@ -65,7 +67,11 @@ function createPeer() {
         if (conn !== pc) return;
         if (conn.connectionState === "connected") findRoute(conn).catch(() => { });
         if (conn.connectionState === "connected") retries = 0;
-        if (conn.connectionState === "failed") retry(conn);
+        if (conn.connectionState === "failed") {
+            // the other side's server connection had already closed: it's really gone, nothing to retry with
+            if (heldBye) peerGone(heldBye);
+            else retry(conn);
+        }
     };
 }
 
@@ -75,7 +81,7 @@ function retry(conn) {
     if (!ws) {
         closePeer();
         if (file) $("code").textContent = "";
-        status(`connection failed while the server was restarting, ${file ? "pick the file again" : "ask for a new code"}`);
+        status(`connection failed while the server was unreachable, ${file ? "pick the file again" : "ask for a new code"}`);
         return;
     }
     if (retries >= MAX_RETRIES) {
@@ -130,8 +136,16 @@ async function sendFile(ch) {
         wake = r;
         setTimeout(r, 1000);
     });
+    const conn = pc;
     ch.addEventListener("bufferedamountlow", () => wake());
-    ch.addEventListener("close", () => wake());
+    ch.addEventListener("close", () => {
+        wake();
+        // the receiver cancelled or closed its tab (its "bye" may have been held back);
+        // after "done", or when this side moved on, pc is no longer conn
+        if (conn !== pc) return;
+        closePeer();
+        status("receiver left, waiting for receiver...");
+    });
     ch.onmessage = (e) => {
         if (e.data === "go") go = true;
         else if (e.data.startsWith("ack ")) {
@@ -143,9 +157,9 @@ async function sendFile(ch) {
             closePeer();
             if (ws) status(`sent ✓  code still active, keep this tab open to send again`);
             else {
-                // the server went away during the transfer, so the code died with it
+                // the server connection dropped during the transfer, so the code died with it
                 $("code").textContent = "";
-                status("sent ✓  the server restarted meanwhile, pick the file again to send it again");
+                status("sent ✓  the server connection dropped meanwhile, pick the file again to send it again");
             }
         }
         wake();
@@ -406,15 +420,23 @@ async function handle(msg) {
             console.warn("bad candidate", err);
         }
     } else if (msg.type === "bye") {
-        if (file) {
-            if (!pc) return;
-            closePeer();
-            status("receiver left, waiting for receiver...");
-        } else {
-            leave();
-            status(msg.reason === "expired" ? "code expired (codes last 1 hour)"
-                : "the sender closed the tab or picked another file, this code no longer works");
-        }
+        // The other side's server connection closed. While the peer connection works, that can be just its
+        // signaling dropping (phone screen off, network switch) mid-transfer: the data channel closing or the
+        // connection failing decides whether it really left.
+        if (pc?.connectionState === "connected") heldBye = msg;
+        else peerGone(msg);
+    }
+}
+
+function peerGone(msg) {
+    if (file) {
+        if (!pc) return;
+        closePeer();
+        status("receiver left, waiting for receiver...");
+    } else {
+        leave();
+        status(msg.reason === "expired" ? "code expired (codes last 1 hour)"
+            : "the sender closed the tab or picked another file, this code no longer works");
     }
 }
 

@@ -1,7 +1,7 @@
 // Browser tests: two real browsers (Chrome sender; Chrome, Edge or Firefox receiver) against a running app.
 //   npm i && npx playwright-core install firefox      (once; Chrome and Edge must be installed)
 //   node browser.test.mjs <test>...
-//   tests: basic edge zero unicode html second multi senderdrop cancel nosw dataclone firefox long
+//   tests: basic edge zero unicode html second multi senderdrop cancel recvsocket sendsocket nosw dataclone firefox long
 //   env:   APP_URL (default http://localhost:8000/), TEST_DIR (big files + downloads; default <tmp>/p2p-test),
 //          LONG_MB (size of the "long" test, default 3072), NOPING=1 (run "firefox" without the keep-alive ping)
 import { chromium, firefox } from "playwright-core";
@@ -238,6 +238,40 @@ async function midway(action) {
     }
 }
 
+// a dropped server connection mid-transfer (phone screen off, network switch, server restart) must not stop it:
+// the file goes peer to peer, and the "bye" the server then sends the other side is no proof it left
+async function socketdrop(side) {
+    const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
+    try {
+        const sp = await page(send, { waitForSW: false }), rp = await page(recv);
+        const f = makeFile(`drop-${side}.bin`, 300 * MB);
+        const code = await share(sp, f);
+        const dlEvent = rp.waitForEvent("download");
+        await rp.fill("#codeIn", code);
+        await rp.click("#receive");
+        const d = await dlEvent;
+        await until(rp, /receiving .*?  ([2-9]\d|\d{3,})\.\d MB \//, 60000); // 20+ MB in
+        const record = (p) => p.evaluate(() => {
+            window.seen = [];
+            for (const el of [document.getElementById("sendStatus"), document.getElementById("recvStatus")]) {
+                new MutationObserver(() => window.seen.push(el.textContent)).observe(el, { childList: true, characterData: true, subtree: true });
+            }
+        });
+        await Promise.all([record(sp), record(rp)]);
+        await (side === "send" ? sp : rp).evaluate(() => ws.close()); // eslint-disable-line no-undef
+        const path = await Promise.race([d.path().catch(() => null), new Promise((r) => setTimeout(r, 120000, null))]);
+        check(path && (await sha1(path)) === f.sha1, `${side === "send" ? "sender" : "receiver"}'s server connection dropped mid-transfer: file still arrives byte-identical`);
+        check(await until(rp, /in your downloads/), `receiver says: ${await recvStatus(rp)}`);
+        check(await until(sp, /^sent/, 10000, "#sendStatus"), `sender says: ${await sendStatus(sp)}`);
+        const alerts = [...await sp.evaluate(() => window.seen), ...await rp.evaluate(() => window.seen)]
+            .filter((t) => /left|stopped|picked another|no longer works|failed|lost/.test(t));
+        check(!alerts.length, `no false alerts on either side${alerts.length ? ": " + [...new Set(alerts)].join(" | ") : ""}`);
+        rmSync(f.path); if (path) rmSync(path, { force: true });
+    } finally {
+        await Promise.allSettled([send.close(), recv.close()]);
+    }
+}
+
 // fallbacks: browser without a service worker, and one that can't hand a stream to it (Safari's DataCloneError)
 async function fallback(kind) {
     const send = await launch("chrome", "send"), recv = await launch("chrome", "recv");
@@ -317,6 +351,8 @@ const tests = {
     multi,
     senderdrop: () => midway("senderdrop"),
     cancel: () => midway("cancel"),
+    recvsocket: () => socketdrop("recv"),
+    sendsocket: () => socketdrop("send"),
     nosw: () => fallback("nosw"),
     dataclone: () => fallback("dataclone"),
     long: () => long(Number(process.env.LONG_MB || 3072)),
