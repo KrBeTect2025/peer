@@ -14,7 +14,7 @@ RUN chmod -R a+rX /app && useradd --system --no-create-home app
 USER app
 EXPOSE 8000
 # One worker only: rooms live in memory (services/rooms.py).
-# PORT is set by hosts like Koyeb; --proxy-headers trusts their HTTPS proxy;
+# PORT is set by hosts like Render; --proxy-headers trusts their HTTPS proxy;
 # the 20 s WebSocket pings keep a waiting sender's socket from being cut as idle.
 CMD exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}" --workers 1 \
     --proxy-headers --forwarded-allow-ips "*" \

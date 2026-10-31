@@ -61,7 +61,7 @@ For a full walkthrough of every component, see **[EXPLANATION.md](EXPLANATION.md
 | State | Redis 7 (code lifecycle, TTLs) |
 | Frontend | Vanilla JavaScript, WebRTC DataChannel, Service Worker, Streams API, File System Access API, OPFS |
 | Networking | STUN (Google, Cloudflare), TURN ([Metered](https://www.metered.ca/)) |
-| Deployment | [Koyeb](https://www.koyeb.com/) + Upstash Redis in production ([DEPLOY.md](DEPLOY.md)); Docker Compose + Cloudflare Tunnel locally |
+| Deployment | [Render](https://render.com/) + Upstash Redis in production ([DEPLOY.md](DEPLOY.md)); Docker Compose + Cloudflare Tunnel locally |
 | Testing | Playwright (Chrome, Edge, Firefox), Python |
 
 ## Getting started
@@ -113,11 +113,11 @@ Open `http://localhost:8000`. Browsers allow WebRTC and service workers on `loca
 | `METERED_TURN_URL` | (unset) | Metered credentials URL (`…/api/v1/turn/credentials?apiKey=…`). If unset, only STUN is used. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string (`rediss://` for TLS, e.g. Upstash) |
 | `CODE_TTL` | `3600` | How long a code stays valid, in seconds |
-| `PORT` | `8000` | Port the Docker image listens on (set by hosts like Koyeb) |
+| `PORT` | `8000` | Port the Docker image listens on (set by hosts like Render) |
 
 ## Deploying
 
-The production setup is one container on **Koyeb**, with **Upstash** for Redis and **Metered** for TURN, all on free plans. Koyeb builds the `Dockerfile` from GitHub and serves the app over HTTPS. See **[DEPLOY.md](DEPLOY.md)** for the step-by-step setup and the checks to run afterwards.
+The production setup is one container on **Render**, with **Upstash** for Redis and **Metered** for TURN, all on free plans. Render builds the `Dockerfile` from GitHub using [`render.yaml`](render.yaml) and serves the app over HTTPS. On the free plan the server sleeps after 15 minutes with no open pages, and the next visitor waits about a minute. See **[DEPLOY.md](DEPLOY.md)** for the step-by-step setup and the checks to run afterwards.
 
 ## Usage
 
@@ -160,7 +160,8 @@ There is no size cap in the app: the file is streamed straight to the receiver's
 ├── tests/                  # Playwright browser tests, code-lifecycle and zip tests, REPORT.md
 ├── Dockerfile              # production image (also used by docker compose)
 ├── docker-compose.yml      # local stack: app + Redis + Cloudflare quick tunnel
-└── DEPLOY.md               # Koyeb + Upstash deployment guide
+├── render.yaml             # Render Blueprint: the production service
+└── DEPLOY.md               # Render + Upstash deployment guide
 ```
 
 ## Testing

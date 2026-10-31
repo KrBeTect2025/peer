@@ -1,57 +1,59 @@
-# Deploying to Koyeb
+# Deploying to Render
 
-The app runs as one Docker container on [Koyeb](https://www.koyeb.com/), with [Upstash](https://upstash.com/) for Redis and [Metered](https://www.metered.ca/) for TURN. All three have free plans. Koyeb builds the `Dockerfile` straight from GitHub and gives the app an HTTPS URL, so no Cloudflare tunnel is needed.
+The app runs as one Docker container on [Render](https://render.com/), with [Upstash](https://upstash.com/) for Redis and [Metered](https://www.metered.ca/) for TURN. All three have free plans. Render builds the `Dockerfile` straight from GitHub and gives the app an HTTPS URL, so no Cloudflare tunnel is needed. The service is described in [`render.yaml`](render.yaml), so Render sets it up in one pass.
 
 | Piece | Where | Why |
 |---|---|---|
-| FastAPI app (page, `/config`, WebSocket signaling) | Koyeb web service, **exactly 1 instance** | Rooms live in memory, so every peer must reach the same process |
-| Redis (code states) | Upstash | Koyeb's free plan allows one service, so Redis can't run beside the app |
+| FastAPI app (page, `/config`, WebSocket signaling) | Render web service, **exactly 1 instance** | Rooms live in memory, so every peer must reach the same process |
+| Redis (code states) | Upstash | Render's free Key Value store loses its data on every restart |
 | TURN relay | Metered | Unchanged from local use |
 
 ## 1. Redis on Upstash
 
-1. Sign in at [console.upstash.com](https://console.upstash.com/) and create a **Redis** database.
-2. Pick the region closest to the Koyeb region you'll use in step 2: **eu-central-1 (Frankfurt)** for Koyeb Frankfurt, or **us-east-1** for Koyeb Washington. Keep TLS on (the default).
-3. Copy the connection URL. It looks like `rediss://default:<password>@<name>.upstash.io:6379`. Note the double `s`: that's TLS.
+1. Sign in at [console.upstash.com](https://console.upstash.com/) and create a **Redis** database in **eu-central-1 (Frankfurt)**, the same region as the Render service. Keep TLS on (the default).
+2. On the database page, under **Connect**, open the **TCP** tab (not REST), reveal the password with the eye icon and copy the URL. It must look like:
 
-Each transfer uses only a few Redis commands, so the free plan is plenty.
+   ```
+   rediss://default:<password>@<name>.upstash.io:6379
+   ```
 
-## 2. The app on Koyeb
+   Note the double `s` in `rediss`: that turns on TLS. The `redis-cli` line at the top of the page says `redis://` with a separate `--tls` flag, which the app doesn't use.
 
-1. Sign in at [app.koyeb.com](https://app.koyeb.com/) (GitHub login is simplest).
-2. **Create service → Web service → GitHub.** Install the Koyeb GitHub app for `KrBeTect2025/peer` when asked; that lets Koyeb redeploy on every push.
-3. Repository `KrBeTect2025/peer`, branch `master`.
-4. **Builder:** Dockerfile. Leave the Dockerfile path, command and arguments at their defaults; the `Dockerfile` already starts the server correctly.
-5. **Instance:** Free (or any paid size). **Region:** Frankfurt or Washington, matching Upstash.
-6. **Environment variables.** Add both as **Secrets**, never as plain text:
+Optional check: `redis-cli -u '<that URL>' ping` prints `PONG`.
+
+## 2. The app on Render
+
+1. Sign in at [dashboard.render.com](https://dashboard.render.com/) with GitHub.
+2. **New → Blueprint.** Connect GitHub when asked and give Render access to `KrBeTect2025/peer`.
+3. Pick the `KrBeTect2025/peer` repository, branch `master`. Render reads `render.yaml` and shows one web service, `peer` (Docker, Free, Frankfurt, health check `/healthz`).
+4. Render asks for the two values marked as secret in `render.yaml`:
 
    | Name | Value |
    |---|---|
    | `REDIS_URL` | the Upstash `rediss://…` URL from step 1 |
-   | `METERED_TURN_URL` | your Metered credentials URL (`https://<app>.metered.live/api/v1/turn/credentials?apiKey=…`) |
+   | `METERED_TURN_URL` | your Metered credentials URL (`https://<app>.metered.live/api/v1/turn/credentials?apiKey=…`), the same one as in your local `.env` |
 
-   Don't set `PORT`: Koyeb sets it, and the server listens on whatever it says. `CODE_TTL` is optional (default 3600).
-7. **Ports:** `8000`, protocol HTTP, route `/`. This is the default.
-8. **Health check:** switch from TCP to **HTTP**, port `8000`, path `/healthz`.
-9. **Scaling:** 1 instance. On a paid plan, keep min and max at 1: a second instance would split rooms between processes and receivers would get "no such code".
-10. Name the service (the name becomes part of the URL) and **Deploy**. The first build takes a few minutes. The logs should end with `Uvicorn running on http://0.0.0.0:8000`.
+   Don't set `PORT`: Render sets it, and the server listens on whatever it says.
+5. **Apply.** The first build takes a few minutes. The logs should end with `Uvicorn running on http://0.0.0.0:10000` (the port Render picks).
 
-The app is live at `https://<service>-<org>.koyeb.app`.
+The app is live at `https://peer.onrender.com`, or `https://peer-<random>.onrender.com` if that name is taken. The service page shows the exact URL.
+
+Secrets live only in Render, never in the repo. To change one later: service → **Environment** → edit → **Save, rebuild and deploy**.
 
 ## 3. Check the deployment
 
 ```bash
-APP=https://<service>-<org>.koyeb.app
+APP=https://<your-service>.onrender.com
 curl $APP/healthz        # {"ok":true}
 curl $APP/config         # must list turn: / turns: servers, not only stun:
 ```
 
-If `/config` shows only `stun:` servers, `METERED_TURN_URL` is missing or wrong. Check the Koyeb logs for `Metered TURN failed`.
+If `/config` shows only `stun:` servers, `METERED_TURN_URL` is missing or wrong. Check the Render logs for `Metered TURN failed`.
 
 Then try it for real:
 
 1. **Different networks.** Send from a laptop on Wi-Fi to a phone on mobile data. This is the case local testing couldn't cover.
-2. **Idle sender.** Pick a file, wait 3 minutes without entering the code anywhere, then receive. This shows Koyeb's proxy isn't cutting a waiting sender's connection (the server pings it every 20 s to prevent that).
+2. **Idle sender.** Pick a file, wait **20 minutes** without entering the code anywhere, then receive. This shows the page's keepalive stops Render from putting the server to sleep under a waiting code.
 3. **Browser tests** against the live URL, from `tests/`:
 
    ```bash
@@ -60,10 +62,12 @@ Then try it for real:
 
 ## How the free plan behaves
 
-- **Sleep after 1 hour without traffic.** Koyeb's free instance scales to zero when nothing has reached it for an hour, and the next visitor waits 1–5 seconds while it wakes. An open WebSocket counts as traffic, so a sender waiting for a receiver keeps it awake.
-- **Waiting codes die on a redeploy.** Running transfers continue, because the file goes peer to peer and the page ignores a server drop once connected. Senders who were still waiting see "disconnected from server" and pick the file again.
-- **Every push to `master` redeploys**, so push when nobody is waiting on a code.
+- **Sleep after 15 minutes without traffic.** Render stops a free service when no request or WebSocket message has arrived for 15 minutes. The next visitor sees Render's loading page for about a minute while it starts again.
+- **Open pages keep it awake.** Every open page sends a small keepalive over its WebSocket once a minute, which counts as traffic. So a sender waiting for a receiver, or a long transfer, keeps the server up. The server drops these messages instead of relaying them.
+- **750 free hours a month** per workspace. One always-on service uses at most 744, so this one service fits. A second free service would share the same hours.
+- **Restarts and redeploys.** Render may restart a free service at any time, and every push to `master` redeploys. Running transfers continue, because the file goes peer to peer and the page ignores a server drop once connected. Senders still waiting on a code see "disconnected from server" and pick the file again, so push when nobody is waiting.
+- **One instance.** The free plan can't scale beyond one, which is what the app needs. On a paid plan, keep it at 1 instance too: a second one would split rooms between processes and receivers would get "no such code".
 
 ## Updating
 
-Push to `master`. Koyeb rebuilds and swaps the instance automatically. Secrets stay in Koyeb and never go in the repo.
+Push to `master`. Render rebuilds and swaps the instance automatically. To always be awake (no cold start), move the service to a paid instance in its **Settings**; nothing in the code changes.

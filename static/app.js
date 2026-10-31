@@ -418,6 +418,7 @@ async function handle(msg) {
     }
 }
 
+const KEEPALIVE = '{"type":"keepalive"}'; // dropped by the server, never relayed
 const EXPIRED = "code expired: the sender closed the tab, picked another file, or its 1 hour ran out";
 
 // the stored request may have failed long ago (server was down at page load): ask again before giving up
@@ -444,6 +445,9 @@ async function join(code) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${proto}://${location.host}/ws/file-${code}${file ? "?role=send" : ""}`);
     ws = socket;
+    // free hosts (Render) put the server to sleep after 15 min without inbound messages, killing a waiting code
+    const keepalive = setInterval(() => socket.readyState === WebSocket.OPEN && socket.send(KEEPALIVE), 60000);
+    socket.addEventListener("close", () => clearInterval(keepalive));
     chain = Promise.resolve();
     socket.onmessage = (e) => {
         const msg = JSON.parse(e.data);

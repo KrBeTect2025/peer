@@ -1,0 +1,14 @@
+# Render Blueprint: New → Blueprint → pick this repo. Render asks for the two secrets once.
+services:
+  - type: web
+    name: peer
+    runtime: docker
+    plan: free
+    region: frankfurt # keep in the same region as the Upstash Redis database
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: REDIS_URL # Upstash TCP URL: rediss://default:<password>@<host>.upstash.io:6379
+        sync: false
+      - key: METERED_TURN_URL # https://<app>.metered.live/api/v1/turn/credentials?apiKey=<key>
+        sync: false

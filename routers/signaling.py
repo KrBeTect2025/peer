@@ -5,7 +5,7 @@ import redis.asyncio as redis
 from core.server import app
 from db.client import CODE_TTL, db
 from fastapi import WebSocket, WebSocketDisconnect
-from services.rooms import rooms, send_safe
+from services.rooms import KEEPALIVE, rooms, send_safe
 
 
 @app.websocket("/ws/{room_id}")
@@ -50,6 +50,8 @@ async def signaling(websocket: WebSocket, room_id: str, role: str = ""):
     async def relay():
         while True:
             text = await websocket.receive_text()
+            if text == KEEPALIVE:
+                continue
             for peer in peers:
                 if peer is not websocket:
                     await send_safe(peer, text)

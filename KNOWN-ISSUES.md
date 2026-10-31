@@ -23,7 +23,7 @@ Open problems found by the production-event test run (see [tests/PROD-TEST-REPOR
 
 ## Deployment notes
 
-- Production runs on Koyeb with Upstash Redis: see [DEPLOY.md](DEPLOY.md). Keep the Koyeb service at exactly one instance.
+- Production runs on Render with Upstash Redis: see [DEPLOY.md](DEPLOY.md). Keep the Render service at exactly one instance.
 - The server must run as **one worker**: rooms live in memory (`services/rooms.py`). Only the code states are in Redis.
 - A restart or deploy no longer stops transfers already in progress (F1), but every waiting code dies with the old process. Senders see "disconnected from server" and pick the file again.
 - Without `METERED_TURN_URL`, only direct connections work. Users on strict networks will see "connection failed (different networks need a reachable TURN server)".
