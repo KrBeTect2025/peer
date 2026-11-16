@@ -113,6 +113,7 @@ Open `http://localhost:8000`. Browsers allow WebRTC and service workers on `loca
 | `METERED_TURN_URL` | (unset) | Metered credentials URL (`…/api/v1/turn/credentials?apiKey=…`). If unset, only STUN is used. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string (`rediss://` for TLS, e.g. Upstash) |
 | `CODE_TTL` | `3600` | How long a code stays valid, in seconds |
+| `VT_API_KEY` | (unset) | VirusTotal API key for the hash lookup ([Safety checks](#safety-checks)). If unset, the panel says "Hash check unavailable". |
 | `PORT` | `8000` | Port the Docker image listens on (set by hosts like Render) |
 
 ## Deploying
@@ -138,6 +139,27 @@ There is no size cap in the app: the file is streamed straight to the receiver's
 | **Safari fallback** | Saves into the browser's site storage first, which the browser limits per site, so very large files need Chrome, Edge or Firefox on the receiving side. |
 | **1-hour code expiry** | Doesn't cut off a running transfer: after an hour no new receiver can join, but the current one finishes. |
 
+## Safety checks
+
+The receiver sees a safety panel for every file, with two checks. Neither one uploads the file anywhere.
+
+| Check | How | When the result shows |
+|---|---|---|
+| **File type** | The first 16 bytes ("magic bytes") show the real type, which is compared with the file name (`static/filetype.js`). Warns on programs, a type that doesn't match the name (a program named `photo.jpg`), double extensions such as `invoice.pdf.exe`, script extensions (`.bat`, `.ps1`, `.vbs`, `.js`, `.sh`, ...) and reversed-text characters in the name. | Within the first chunk, so in the first second, even for a huge file |
+| **Malware database** | The receiver's browser computes the file's SHA-256 chunk by chunk while it arrives. Only that 64-character hash is sent to `POST /scan/hash`, and the server asks VirusTotal whether the hash belongs to known malware. | When the last byte is in |
+
+The panel's color is the worse of the two results: red (danger), orange (be careful), green (no problems found) or grey (not verified). A warning never blocks the download.
+
+What these checks **cannot** do:
+
+- **The hash lookup only catches known malware.** It finds files someone has already uploaded to VirusTotal and engines have flagged. New, modified or targeted malware comes back "not in the database", which does **not** mean safe. Most files people make themselves also come back "not in the database".
+- **The file-type check catches disguised files, not threats in general.** A real PDF, Office document or ZIP can still carry something harmful. A ZIP's contents are not checked, and files sent as several files or a folder arrive as one zip built during the transfer, so their hash is always new and always "not in the database".
+- **The results come after the file is saved.** Files are written to disk as they arrive (that is how 200 GB works with flat memory), so the hash result shows once the download is done. If it says malicious, delete the file without opening it. The type warning usually shows long before a large file finishes.
+- **The hash is not fully private.** For a file that is already public, its hash identifies it. The Peer server and VirusTotal learn that your IP checked that exact file.
+- **The free VirusTotal key is small and not for commercial use.** It allows 4 lookups a minute and 500 a day for the whole site. When that runs out, receivers see "Hash check unavailable". Results are cached for an hour, and each IP is limited to 4 lookups a minute and 40 a day so one person can't use up the quota. A paid VirusTotal plan is needed for commercial use.
+
+To turn the hash lookup on, set `VT_API_KEY` (a free key from your VirusTotal account). Without it everything else works and the panel says "Hash check unavailable".
+
 ## Project structure
 
 ```
@@ -147,15 +169,19 @@ There is no size cap in the app: the file is streamed straight to the receiver's
 ├── routers/
 │   ├── pages.py            # index page, /sw.js (served from root for full scope), /healthz
 │   ├── ice.py              # GET /config: STUN/TURN servers (keeps the API key server-side)
+│   ├── scan.py             # POST /scan/hash: cache + per-IP limit around the VirusTotal lookup
 │   └── signaling.py        # WS /ws/{room}: code lifecycle + message relay
 ├── services/
 │   ├── rooms.py            # in-memory room → sockets map
-│   └── turn.py             # Metered credential fetch with 1-hour cache
+│   ├── turn.py             # Metered credential fetch with 1-hour cache
+│   └── virustotal.py       # hash → malicious / suspicious / clean / unknown / error
 ├── db/client.py            # Redis client, CODE_TTL
 ├── static/
 │   ├── index.html          # UI
 │   ├── app.js              # WebRTC, flow control, sinks, retries
 │   ├── sw.js               # service worker: stream → browser download
+│   ├── filetype.js         # magic-byte file-type check (safety panel)
+│   ├── vendor/             # hash-wasm 4.12.0 SHA-256 (MIT): hashes the file chunk by chunk
 │   └── zip.js              # streaming ZIP/ZIP64 writer for multi-file sends
 ├── tests/                  # Playwright browser tests, code-lifecycle and zip tests, REPORT.md
 ├── Dockerfile              # production image (also used by docker compose)
@@ -187,9 +213,20 @@ node zip.test.mjs
 python check_codes.py ws://127.0.0.1:8000
 ```
 
+Safety checks (no network needed: VirusTotal is mocked and never called for real):
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests                  # POST /scan/hash
+node --test tests/filetype.test.mjs     # file-type check
+```
+
+For one real end-to-end check, send the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) with `VT_API_KEY` set: it is a harmless file every antivirus flags on purpose, so the panel should say malicious. Your own antivirus may delete it before it is sent.
+
 ## Limitations
 
 - **No resume after a dropped connection.** A broken transfer starts over, which matters most for 100 GB+ files.
 - **Single server instance.** Live WebSocket rooms are held in memory, so the app runs as one Uvicorn worker. Scaling out would need a shared pub/sub layer, such as Redis channels.
 - **Not tested on Safari or mobile devices.** Safari's stream behaviour is simulated in tests.
 - **Throughput depends on the network path.** Relayed (TURN) transfers count against the Metered quota.
+- **The safety checks are not a virus scan.** See [Safety checks](#safety-checks) for exactly what they catch and miss.
