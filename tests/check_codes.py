@@ -1,6 +1,8 @@
 # Smoke check for code states against a running server:
 #   python tests/check_codes.py [ws_base] [code_ttl]
 #   e.g. python tests/check_codes.py ws://localhost:8000      (default), or wss://<tunnel>.trycloudflare.com
+# Not against Render: its proxy passes close frames neither way, so the server learns seconds late that a
+# client left and the "sender left" checks race it.
 # Pass code_ttl only if the server runs with that short CODE_TTL, to also check the 1-hour cutoff.
 import asyncio
 import json

@@ -1,0 +1,5 @@
+# Test tools only (not installed in the Docker image):  pip install -r requirements.txt -r requirements-dev.txt
+# then run:  python -m pytest tests
+pytest==9.0.3
+respx==0.23.1
+fakeredis==2.40.0

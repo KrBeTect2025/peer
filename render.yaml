@@ -1,4 +1,4 @@
-# Render Blueprint: New → Blueprint → pick this repo. Render asks for the two secrets once.
+# Render Blueprint: New → Blueprint → pick this repo. Render asks for the secrets once.
 services:
   - type: web
     name: peer
@@ -11,4 +11,6 @@ services:
       - key: REDIS_URL # Upstash TCP URL: rediss://default:<password>@<host>.upstash.io:6379
         sync: false
       - key: METERED_TURN_URL # https://<app>.metered.live/api/v1/turn/credentials?apiKey=<key>
+        sync: false
+      - key: VT_API_KEY # VirusTotal API key for the hash check; leave empty to turn it off
         sync: false

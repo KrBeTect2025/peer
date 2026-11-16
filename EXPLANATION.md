@@ -330,6 +330,27 @@ ping, Firefox killed the download at exactly 30 s. Details in [tests/REPORT.md](
 
 DataChannels are always encrypted (DTLS). Even when the data goes through TURN, the relay only sees encrypted packets. Anyone who knows the code while the sender's tab is open can download the file, so treat the code like a password and close the tab when you're done.
 
+### Safety checks: `filetype.js`, the hasher and `POST /scan/hash`
+
+The server never sees the file, so it can't virus-scan it. The receiver's browser runs two checks instead, inside `receiveInto(ch)`, beside the transfer and never blocking it:
+
+1. **File type, on the first chunk.** `checkHead` keeps the first 16 bytes and passes them to `checkFileType(name, bytes)` in `static/filetype.js`. Most formats start with a fixed byte pattern (a Windows program with `MZ`, a PDF with `%PDF`), so those bytes show what the file really is, whatever its name says. The function returns a level (`ok`, `info`, `warning`, `danger`), a one-line summary and the warnings. It is a plain function with no browser APIs, so `tests/filetype.test.mjs` tests it with byte arrays.
+2. **Hash, chunk by chunk.** `newHasher()` creates a SHA-256 hasher before the receiver sends `go`, so no chunk can arrive before it exists. Every chunk goes through `hasher.update(bytes)` as it arrives. When the last byte is in, `lookupHash()` posts only `{"sha256": "<64 hex>"}` to `/scan/hash`.
+
+**Why not `crypto.subtle.digest`?** The browser's built-in hashing takes the whole file as one buffer. This app never has the whole file in memory: it is written to disk in 8 MB batches as it arrives. Hashing in steps needs a library, so `static/vendor/` holds the SHA-256 part of [hash-wasm](https://www.npmjs.com/package/hash-wasm) (18 KB, MIT, pinned to 4.12.0 and served from this site, so no CDN is involved). Memory stays flat and there is no file size limit.
+
+**The cost of streaming.** By the time the hash is known, the file is already in the user's downloads. The panel can't warn *before* saving; it tells the user to delete a malicious file without opening it. The type check usually shows within the first second, long before a big file finishes.
+
+**On the server**, `routers/scan.py` handles the request:
+
+1. FastAPI checks the body against `HashIn`: exactly 64 hex characters, or a 422 reply.
+2. It looks in Redis for `scan:<hash>` (kept for 1 hour). The cache is in Redis, not in memory, because Render restarts the free instance and an in-memory cache would be lost.
+3. Without `VT_API_KEY` it answers `error` straight away, without touching the rate limit.
+4. `allowed(ip)` counts lookups per IP in two Redis counters (per minute and per day) that expire on their own. The IP comes from `CF-Connecting-IP`, which Cloudflare (in front of both Render and the local tunnel) sets and overwrites. `X-Forwarded-For` would be wrong here: its first entry is whatever the browser wrote, and that is the entry uvicorn trusts with `--forwarded-allow-ips "*"`, so anyone could pretend to be a new IP on every request.
+5. `services/virustotal.py` asks VirusTotal's `GET /api/v3/files/{hash}` with a 5 s timeout and maps the answer: any engine saying malicious → `malicious`; else any suspicious → `suspicious`; known but never scanned → `unknown` (not `clean`); known and unflagged → `clean`; 404 → `unknown`; anything else (timeout, 429 rate limit, bad key) → `error`. Errors are not cached, so the next try can succeed.
+
+`ui.safety` in `static/ui.js` draws the panel. Its level is the worse of the two checks, so a `clean` hash can't hide a disguised program. Everything from the sender (file name, extension) goes in through `textContent`, never `innerHTML`, so a crafted name can't inject HTML into the page.
+
 ---
 
 ## 5. Docker: `Dockerfile` + `docker-compose.yml`

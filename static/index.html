@@ -124,6 +124,20 @@
         .recv-body { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; }
         .incoming { font-size: 14px; margin-bottom: 24px; }
         .incoming .mono { color: var(--body); font-size: 12px; margin-left: 8px; }
+
+        /* safety check panel (ui.js fills it): the border and title take the overall level's color */
+        .safety { --tone: var(--muted); border: 1px solid var(--hairline-strong); border-left: 3px solid var(--tone); background: var(--surface); padding: 12px 16px; margin-bottom: 24px; font-size: 13px; color: var(--body); }
+        .safety[data-level="ok"] { --tone: var(--success); }
+        .safety[data-level="warning"] { --tone: var(--warning); }
+        .safety[data-level="danger"] { --tone: var(--red-text); background: rgba(69, 10, 10, .6); }
+        .safety strong { display: block; color: var(--tone); font-size: 14px; margin-bottom: 8px; }
+        .safety[data-level="info"] strong, .safety[data-level="pending"] strong { color: var(--ink); }
+        .safety dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
+        .safety dt { color: var(--muted); }
+        .safety dd { margin: 0; color: var(--ink); word-break: break-word; }
+        .safety ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink); }
+        .safety li + li { margin-top: 4px; }
+        @media (max-width: 420px) { .safety dl { grid-template-columns: 1fr; } .safety dd { margin-bottom: 4px; } }
         .codein { position: relative; display: flex; gap: 16px; margin-bottom: 32px; }
         .cellgroup { display: flex; }
         .codein.err .cellgroup > span { border-color: var(--red-text); }
@@ -321,6 +335,7 @@
                 <h2 class="eyebrow" id="recvTitle">02 // receive</h2>
                 <div class="recv-body">
                     <div class="incoming" id="incoming" hidden></div>
+                    <div class="safety" id="safety" role="status" hidden></div>
                     <label class="sr-only" for="codeIn">6-digit code</label>
                     <div class="codein" id="cells">
                         <div class="cellgroup"><span></span><span></span><span></span></div>
@@ -374,6 +389,8 @@
     <div class="toasts" id="toasts" aria-live="polite"></div>
 
     <script src="/static/zip.js"></script>
+    <script src="/static/filetype.js"></script>
+    <script src="/static/vendor/hash-wasm-sha256.umd.min.js"></script>
     <script src="/static/ui.js"></script>
     <script src="/static/app.js"></script>
 </body>
