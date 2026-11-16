@@ -3,15 +3,79 @@
 const MAX32 = 0xffffffff;
 const FLAGS = 0x0808; // bit 3: CRC comes after the data; bit 11: names are UTF-8
 
-const CRC_TABLE = new Int32Array(256).map((_, n) => {
-    for (let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1;
-    return n;
-});
+// CRC-32, slicing-by-8: eight tables, 8 bytes per step (about 3x byte at a time)
+function crcTables() {
+    const t = Array.from({ length: 8 }, () => new Int32Array(256));
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        t[0][n] = c;
+    }
+    for (let k = 1; k < 8; k++) {
+        for (let n = 0; n < 256; n++) t[k][n] = t[0][t[k - 1][n] & 255] ^ (t[k - 1][n] >>> 8);
+    }
+    return t;
+}
+const CRC_TABLES = crcTables();
 function crc32(crc, bytes) {
+    const [t0, t1, t2, t3, t4, t5, t6, t7] = CRC_TABLES;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const end8 = bytes.length & ~7;
+    let i = 0;
     crc = ~crc;
-    for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 255] ^ (crc >>> 8);
+    for (; i < end8; i += 8) {
+        const a = crc ^ view.getInt32(i, true), b = view.getInt32(i + 4, true);
+        crc = t7[a & 255] ^ t6[(a >>> 8) & 255] ^ t5[(a >>> 16) & 255] ^ t4[a >>> 24]
+            ^ t3[b & 255] ^ t2[(b >>> 8) & 255] ^ t1[(b >>> 16) & 255] ^ t0[b >>> 24];
+    }
+    for (; i < bytes.length; i++) crc = t0[(crc ^ bytes[i]) & 255] ^ (crc >>> 8);
     return ~crc >>> 0;
 }
+
+// The CRCs are worked out in a worker so they never hold up the thread that sends. Done inline on a slow
+// sender (a phone), they made 33 files (280 MB) take about a third longer than one file of the same size.
+// Messages reach the worker in order, so each file's bytes are folded in front to back. Without a worker
+// (Node, which runs the zip tests, or a browser where it didn't start) they're worked out inline.
+const crcWorker = (() => {
+    if (typeof Worker === "undefined") return null;
+    const src = `const CRC_TABLES = (${crcTables})();\n${crc32}\nconst crcs = new Map();
+onmessage = ({ data: [id, bytes] }) => {
+    if (bytes) return crcs.set(id, crc32(crcs.get(id) || 0, bytes));
+    postMessage([id, crcs.get(id) || 0]);
+    crcs.delete(id);
+};
+postMessage("ready");`;
+    let w;
+    try {
+        w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    } catch {
+        return null;
+    }
+    const waiting = new Map();
+    let failed = false;
+    const api = {
+        ready: false, // only zips made after the worker answered use it
+        add: (id, bytes) => w.postMessage([id, bytes]),
+        result: (id) => new Promise((resolve, reject) => {
+            if (failed) return reject(new Error("checksum worker stopped"));
+            waiting.set(id, { resolve, reject });
+            w.postMessage([id]);
+        }),
+    };
+    w.onmessage = ({ data }) => {
+        if (data === "ready") return (api.ready = true);
+        waiting.get(data[0])?.resolve(data[1]);
+        waiting.delete(data[0]);
+    };
+    w.onerror = () => {
+        failed = true;
+        api.ready = false;
+        for (const p of waiting.values()) p.reject(new Error("checksum worker stopped"));
+        waiting.clear();
+    };
+    return api;
+})();
+let crcIds = 0;
 
 // writes fields (Uint8Array, or [number, byte count]) little-endian into out at `at`; returns the new offset
 function packInto(out, view, at, fields) {
@@ -51,7 +115,8 @@ function zipFiles(files, name) {
     // receiver reading the same object, or out-of-order reads can't corrupt it. Gaps are read on demand.
     const feed = (e, a, bytes) => {
         if (a !== e.upto) return;
-        e.crc = crc32(e.crc, bytes);
+        if (e.viaWorker) crcWorker.add(e.id, bytes);
+        else e.crc = crc32(e.crc, bytes);
         e.upto += bytes.length;
     };
     const finalCrc = async (e) => {
@@ -59,11 +124,14 @@ function zipFiles(files, name) {
             const a = e.upto, b = Math.min(e.size, a + 1048576);
             feed(e, a, new Uint8Array(await e.file.slice(a, b).arrayBuffer()));
         }
+        // asked once, after every byte went to the worker; later calls (descriptor, trailer, a second receiver) reuse it
+        if (e.viaWorker) e.crc = await (e.done ??= crcWorker.result(e.id));
         return e.crc;
     };
 
+    const viaWorker = !!crcWorker?.ready;
     for (const f of files) {
-        const e = { file: f, name: enc.encode(f.webkitRelativePath || f.name), size: f.size, offset, crc: 0, upto: 0, time: dosTime(f.lastModified) };
+        const e = { file: f, name: enc.encode(f.webkitRelativePath || f.name), size: f.size, offset, crc: 0, upto: 0, time: dosTime(f.lastModified), id: ++crcIds, viaWorker };
         e.zip64 = f.size >= MAX32 || offset >= MAX32;
         entries.push(e);
         const header = pack([0x04034b50, 4], [45, 2], [FLAGS, 2], [0, 2], [e.time, 4], [0, 4], [0, 4], [0, 4],
