@@ -93,6 +93,12 @@ def test_missing_api_key(client, monkeypatch):
     assert not route.called  # never contacts VirusTotal without a key
 
 
+def test_missing_api_key_is_not_reported_as_rate_limit(client, monkeypatch):
+    monkeypatch.setattr(config, "VT_API_KEY", "")
+    answers = [ask(client, f"{i:064x}").json() for i in range(scan.PER_MINUTE + 2)]
+    assert all("VT_API_KEY" in a["message"] for a in answers)
+
+
 @pytest.mark.parametrize("bad", ["", "abc", "g" * 64, "a" * 63, "a" * 65, HASH + "\n"])
 def test_invalid_hash_is_422(client, bad):
     assert client.post("/scan/hash", json={"sha256": bad}).status_code == 422
