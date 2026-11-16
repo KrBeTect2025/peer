@@ -13,6 +13,16 @@ Open problems found by the production-event test run (see [tests/PROD-TEST-REPOR
 | F10 | Cosmetic | At phone width the step list wraps "DONE" onto a second line. | Cosmetic. | — | Shorter labels or a smaller gap under 400 px |
 | F11 | Medium | A waiting code dies whenever the sender's server connection drops. On Render this happens without any deploy: Render replaces instances for maintenance and drops connections on network issues (seen on the live site 8 minutes into an idle wait, 2026-10-31). Running transfers are not affected. | The sender sees "disconnected from server" while waiting and has to pick the file again; a receiver who already has the code gets "code expired". | Pick the file again | The sender reconnects with backoff and reclaims its code with a secret token from `created`; the server keeps the code for a short grace period after a drop instead of expiring it at once |
 
+## Safety check gaps
+
+Known limits of the safety panel (see the README's "Safety checks"), with what fixing each would take:
+
+- **Files inside a zip are not checked.** Several files or a folder arrive as one zip, so the type check only says "ZIP archive" and the hash is always new. Fix: read each entry name from the zip's local headers as chunks arrive and run `checkFileType` on each name and its first bytes.
+- **The hash result comes after the file is saved**, because the download is streamed to disk. A true "check before save" would need a different save path and can't work for the hash, which needs the whole file.
+- **`MZ` is only two bytes**, so a text file that happens to start with "MZ" is reported as a Windows program. Checking the PE header at the offset stored at byte 60 would remove that, but needs more than the first 16 bytes.
+- **The VirusTotal free quota (500 a day) is shared by the whole site.** The per-IP limit stops one person from using it up, not many people.
+- **Not tested with a real VirusTotal key.** Every test mocks VirusTotal; the EICAR check against the real API is still a manual step.
+
 ## Not yet tested
 
 - Two different networks through the Metered TURN relay (all runs were on one machine, so the route was "direct, same network")
