@@ -92,6 +92,18 @@ test("script extensions warn", () => {
     }
 });
 
+test("a .bin that isn't a program is not flagged", () => {
+    // firmware, disk images and data dumps all end in .bin, so the name says nothing about the bytes
+    const r = checkFileType("firmware.bin", head(0x12, 0x34, 0x56, 0x78));
+    assert.equal(r.level, "info");
+    assert.deepEqual(r.warnings, []);
+    assert.equal(r.summary, "not recognised, so not checked");
+    assert.equal(checkFileType("data.bin", PNG).level, "ok");
+    // a real program named .bin still warns, and a Windows one is still caught as disguised
+    assert.equal(checkFileType("tool.bin", ELF).level, "warning");
+    assert.equal(checkFileType("update.bin", EXE).level, "danger");
+});
+
 test("reversed-text characters in the name are danger", () => {
     assert.equal(checkFileType("invoice‮fdp.exe", EXE).level, "danger");
 });

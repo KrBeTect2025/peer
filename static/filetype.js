@@ -31,6 +31,10 @@ const RUNNABLE_EXTS = new Set(["bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", 
 const DECOY_EXTS = new Set(["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "csv", "odt",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "mp3", "wav", "mp4", "mov", "avi", "mkv", "zip", "rar", "html"]);
 
+// extensions that many unrelated formats use (firmware, disk images, raw data dumps), so the name doesn't
+// promise one type. A Linux program named .bin still matches it; any other .bin just isn't checked.
+const GENERIC_EXTS = new Set(["bin"]);
+
 // right-to-left override and similar invisible characters: "invoice‮fdp.exe" shows as "invoiceexe.pdf"
 const BIDI_CHARS = /[‎‏‪-‮⁦-⁩]/;
 
@@ -53,7 +57,7 @@ function checkFileType(name, bytes) {
     const ext = exts.at(-1) ?? "";
     const shown = ext ? "." + ext : "no extension";
     // the type the name claims, when it's one we can check
-    const claimed = ext ? FILE_SIGNATURES.find((s) => s.exts.includes(ext)) : null;
+    const claimed = ext && !GENERIC_EXTS.has(ext) ? FILE_SIGNATURES.find((s) => s.exts.includes(ext)) : null;
 
     let level = "ok";
     const warnings = [];
