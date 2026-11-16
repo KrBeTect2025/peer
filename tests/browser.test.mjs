@@ -290,7 +290,8 @@ async function lostclose() {
         await new Promise((r) => setTimeout(r, 1500));
         await rp.fill("#codeIn", code);
         await rp.click("#receive");
-        check(await until(rp, /code expired/, 5000), `sender gone, close frame lost: receiver says within 5 s: ${await recvStatus(rp)}`);
+        // behind Render the server also learns late that the tab closed, so its "bye" can come first
+        check(await until(rp, /code expired|no longer works/, 5000), `sender gone, close frame lost: receiver says within 5 s: ${await recvStatus(rp)}`);
         rmSync(f.path);
     } finally {
         await Promise.allSettled([send.close(), recv.close()]);
