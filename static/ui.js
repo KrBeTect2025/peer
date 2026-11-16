@@ -247,6 +247,74 @@
         $("online").firstChild.classList.toggle("pulse", ok);
     };
 
-    window.ui = { file, incoming, route, progress, online, begin, finish };
+    // safety panel: the file-type check (filetype.js) and the hash lookup (POST /scan/hash) side by side.
+    // The overall level is the worse of the two, so a "clean" hash can't hide a disguised file.
+    // Text from the sender (names, extensions) only ever goes in through textContent, never innerHTML.
+    const HASH_VIEW = {
+        malicious: (r) => ["danger", `Flagged as malicious by ${r.malicious_count} of ${r.engines_total} engines. It is already saved: delete it without opening it.`],
+        suspicious: (r) => ["warning", `Flagged as suspicious by ${r.suspicious_count} of ${r.engines_total} engines.`],
+        clean: (r) => ["ok", `Known file, no engines flagged it (${r.engines_total} checked).`],
+        unknown: () => ["info", "Not in the malware database. This does NOT mean it is safe."],
+        error: (r) => ["info", "Hash check unavailable" + (r.message ? `: ${r.message}.` : ".")],
+        skipped: (r) => ["info", `Hash check skipped: ${r.message}.`],
+    };
+    const LEVEL_TITLE = { ok: "No problems found", info: "Not verified", warning: "Be careful", danger: "Possible danger" };
+    const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+    let checks = null;
+    const paintSafety = () => {
+        const el = $("safety");
+        el.hidden = !checks;
+        if (!checks) return;
+        const levels = [checks.type?.level, checks.hash?.[0]].filter(Boolean);
+        const worst = levels.reduce((a, b) => (SAFETY_LEVELS[b] > SAFETY_LEVELS[a] ? b : a), "ok");
+        const done = checks.type && checks.hash;
+        // a warning shows straight away; "all fine" only once both checks are in
+        const level = done || SAFETY_LEVELS[worst] >= SAFETY_LEVELS.warning ? worst : "pending";
+        el.dataset.level = level;
+        const title = document.createElement("strong");
+        title.textContent = level === "pending" ? "Checking the file..." : LEVEL_TITLE[level];
+        const rows = document.createElement("dl");
+        for (const [name, value] of [
+            ["File type", checks.type ? cap(checks.type.summary) : "checking..."],
+            ["Malware database", checks.hash ? checks.hash[1] : "waiting for the whole file..."],
+        ]) {
+            const dt = document.createElement("dt");
+            const dd = document.createElement("dd");
+            dt.textContent = name;
+            dd.textContent = value;
+            rows.append(dt, dd);
+        }
+        const list = document.createElement("ul");
+        for (const w of checks.type?.warnings || []) list.append(Object.assign(document.createElement("li"), { textContent: w }));
+        el.replaceChildren(title, rows, ...(list.children.length ? [list] : []));
+        if (level === "danger" && !checks.toasted) {
+            // the panel can scroll out of view on a phone; a danger result must not be missed
+            checks.toasted = true;
+            toast("error", "Safety warning", "This file may be dangerous. See the safety check under Receive.");
+        }
+    };
+    const safety = {
+        start: () => {
+            checks = {};
+            paintSafety();
+        },
+        type: (r) => {
+            if (!checks) return;
+            checks.type = r;
+            paintSafety();
+        },
+        hash: (r) => {
+            if (!checks) return;
+            // an unexpected status is shown as "unavailable", never as fine
+            checks.hash = (HASH_VIEW[r.status] || HASH_VIEW.error)(r);
+            paintSafety();
+        },
+        clear: () => {
+            checks = null;
+            paintSafety();
+        },
+    };
+
+    window.ui = { file, incoming, route, progress, online, begin, finish, safety };
     renderCode();
 }

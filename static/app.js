@@ -205,6 +205,30 @@ function receiveInto(ch) {
     let writes = Promise.resolve();
     let failed = false;
     let t0;
+    // safety checks run beside the transfer and never hold it up (filetype.js, POST /scan/hash)
+    let hasher = null;
+    let head = new Uint8Array(0);
+    let typeChecked = false;
+    let hashSent = false;
+
+    // the first 16 bytes show the real file type; they normally all arrive in the first 64 KB chunk,
+    // so this answer appears in the first second, long before a big file is done
+    const checkHead = (bytes) => {
+        const more = bytes.subarray(0, 16 - head.length);
+        head = Uint8Array.of(...head, ...more);
+        if (head.length >= 16 || got + bytes.byteLength === meta.size) {
+            typeChecked = true;
+            ui.safety.type(checkFileType(meta.name, head));
+        }
+    };
+    // the hash can only be known once the last byte is in, and by then the file is already saved
+    // (it is written to disk as it arrives), so this result comes after the download, not before
+    const lookupHash = async () => {
+        hashSent = true;
+        if (!hasher) return ui.safety.hash({ status: "skipped", message: "this browser can't compute the hash" });
+        ui.safety.hash(await scanHash(hasher.digest("hex")));
+    };
+    const hashSkipped = (why) => hashSent || !meta || ui.safety.hash({ status: "skipped", message: why });
 
     const paint = () => {
         if (!sink || failed) return;
@@ -221,6 +245,7 @@ function receiveInto(ch) {
         failed = true;
         ch.onclose = null;
         sink?.abort();
+        hashSkipped("the transfer didn't finish");
         leave();
         status(why);
     };
@@ -258,34 +283,77 @@ function receiveInto(ch) {
         if (typeof e.data === "string") {
             meta = JSON.parse(e.data);
             ui.incoming(meta);
-            openSink(meta).then((s) => {
+            ui.safety.start();
+            // the hasher is ready before "go", so no chunk can arrive before it
+            Promise.all([openSink(meta), newHasher()]).then(([s, h]) => {
                 if (failed || ch.readyState !== "open") return s.abort();
                 sink = s;
+                hasher = h;
                 t0 = performance.now();
                 ui.begin();
                 watch = setInterval(paint, 1000);
                 ch.send("go");
-                if (meta.size === 0) finish();
+                if (meta.size === 0) {
+                    ui.safety.type(checkFileType(meta.name, head));
+                    hashSent = true;
+                    ui.safety.hash({ status: "skipped", message: "the file is empty" });
+                    finish();
+                }
             }, (err) => stop(err.name === "AbortError" ? "save cancelled" : "transfer refused: " + err.message));
             return;
         }
         if (!sink || got + e.data.byteLength > meta.size) return stop("transfer refused: the sender sent more than it announced");
+        const bytes = new Uint8Array(e.data); // a view, not a copy
+        if (!typeChecked) checkHead(bytes);
+        hasher?.update(bytes);
         batch.push(e.data);
         batchBytes += e.data.byteLength;
         got += e.data.byteLength;
         if (batchBytes >= FLUSH || got === meta.size) flush();
-        if (got === meta.size) finish();
-        else if (paintDue()) paint();
+        if (got === meta.size) {
+            finish();
+            lookupHash();
+        } else if (paintDue()) paint();
     };
     ch.onclose = () => {
         clearInterval(watch);
         if (!meta || got < meta.size) {
             failed = true;
             sink?.abort();
+            hashSkipped("the transfer didn't finish");
             status("transfer stopped: the sender picked another file, closed the tab or lost connection");
         }
         leave();
     };
+}
+
+// SHA-256 fed one chunk at a time. crypto.subtle.digest can't do that: it needs the whole file in
+// memory at once, which this app never has (files are written to disk as they arrive, up to 200 GB).
+// hash-wasm (static/vendor) hashes in steps, so there is no size limit and memory stays flat.
+async function newHasher() {
+    try {
+        const h = await hashwasm.createSHA256();
+        h.init();
+        return h;
+    } catch (err) {
+        console.warn("SHA-256 unavailable, skipping the hash check", err);
+        return null;
+    }
+}
+
+// only the 64-character hash leaves the browser, never the file
+async function scanHash(sha256) {
+    try {
+        const resp = await fetch("/scan/hash", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sha256 }),
+        });
+        if (!resp.ok) throw new Error("server answered " + resp.status);
+        return await resp.json();
+    } catch (err) {
+        return { status: "error", message: err.message };
+    }
 }
 
 // save paths, best first: service worker download, file picker, OPFS, memory
@@ -533,6 +601,7 @@ $("folder").onchange = () => {
 
 function share(f, count = 1) {
     leave();
+    ui.safety.clear();
     ui.file(f, count);
     statusEl = $("sendStatus");
     $("recvStatus").textContent = "";
@@ -551,6 +620,7 @@ $("receive").onclick = () => {
         return;
     }
     leave();
+    ui.safety.clear();
     file = null;
     statusEl = $("recvStatus");
     $("file").value = "";
