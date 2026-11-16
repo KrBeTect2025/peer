@@ -1,5 +1,6 @@
 import json
 
+import config
 import redis.asyncio as redis
 from core.server import app
 from db.client import db
@@ -58,6 +59,9 @@ async def scan_hash(body: HashIn, request: Request):
     except redis.RedisError as err:
         print("redis error:", err)
 
+    if not config.VT_API_KEY:
+        # answer "not configured" straight away: nothing reaches VirusTotal, so nothing counts against the limit
+        return await lookup(sha256)
     if not await allowed(client_ip(request)):
         return result("error", message="too many hash checks from your network, try again later")
 

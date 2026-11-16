@@ -41,7 +41,7 @@ async def lookup(sha256: str) -> dict:
     # read at call time (not import time) so a missing key can't crash startup, and tests can change it
     key = config.VT_API_KEY
     if not key:
-        return result("error", message="hash check is not configured (VT_API_KEY is not set)")
+        return result("error", message="not set up on this server (VT_API_KEY is not set)")
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             resp = await client.get(VT_URL.format(sha256), headers={"x-apikey": key})
@@ -59,7 +59,7 @@ async def lookup(sha256: str) -> dict:
         return result("error", message="VirusTotal's rate limit was reached, try again later")
     if resp.status_code in (401, 403):
         print("virustotal rejected the API key:", resp.status_code)
-        return result("error", message="hash check is misconfigured (VirusTotal rejected the key)")
+        return result("error", message="VirusTotal rejected this server's API key")
     if resp.status_code != 200:
         print("virustotal answered", resp.status_code)
         return result("error", message=f"VirusTotal answered {resp.status_code}")
